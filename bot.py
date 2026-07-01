@@ -26,6 +26,24 @@ class LinkButtonView(discord.ui.View):
         )
 
 
+def _champ(obj, cle, defaut=None):
+    """Récupère un champ que 'obj' soit un dict (JSON brut) ou un objet avec attributs."""
+    if isinstance(obj, dict):
+        return obj.get(cle, defaut)
+    return getattr(obj, cle, defaut)
+
+
+def _prix_de(obj):
+    """Extrait un prix flottant, que le champ 'price' soit un nombre, une chaîne, ou un dict {'amount': ...}."""
+    p = _champ(obj, "price")
+    if isinstance(p, dict):
+        p = p.get("amount")
+    try:
+        return float(p)
+    except (TypeError, ValueError):
+        return None
+
+
 GUILD_ID = os.environ.get("GUILD_ID")
 
 
@@ -90,7 +108,17 @@ async def estimer(
         # On lance la recherche dans un thread à part (ça évite de geler le bot),
         # avec un maximum de 20 secondes d'attente.
         resultat = await asyncio.wait_for(asyncio.to_thread(_rechercher), timeout=20)
-        items = resultat.items
+
+        # Le format renvoyé par la librairie peut varier (objet avec .items, ou dict brut
+        # avec une clé "items"). On gère les deux cas pour être robuste.
+        if isinstance(resultat, list):
+            items = resultat
+        else:
+            items = _champ(resultat, "items", [])
+            if callable(items):  # ex: resultat.items est en fait dict.items (méthode)
+                items = list(resultat.get("items", [])) if isinstance(resultat, dict) else []
+
+        print(f"[estimer] type(resultat)={type(resultat)} nb_items={len(items) if items else 0}")
     except asyncio.TimeoutError:
         await interaction.followup.send(
             "⏱️ Vinted met trop de temps à répondre (probablement un blocage anti-bot temporaire). "
@@ -111,16 +139,15 @@ async def estimer(
     # Nettoyage des prix (parfois vides ou mal formatés)
     prix_valides = []
     for i in items:
-        try:
-            prix_valides.append(float(i.price))
-        except (TypeError, ValueError):
-            continue
+        p = _prix_de(i)
+        if p is not None:
+            prix_valides.append(p)
 
     if not prix_valides:
         await interaction.followup.send("Impossible de récupérer des prix exploitables sur ces annonces.")
         return
 
-    favoris = [getattr(i, "favourite_count", 0) or 0 for i in items]
+    favoris = [_champ(i, "favourite_count", 0) or 0 for i in items]
 
     prix_moyen = statistics.mean(prix_valides)
     prix_median = statistics.median(prix_valides)
@@ -133,7 +160,7 @@ async def estimer(
     prix_conseille = max(round(prix_median * 0.95, 2), prix_min)
 
     # Les 3 annonces comparables qui ont le plus de favoris = les plus "demandées"
-    top = sorted(items, key=lambda i: getattr(i, "favourite_count", 0) or 0, reverse=True)[:3]
+    top = sorted(items, key=lambda i: _champ(i, "favourite_count", 0) or 0, reverse=True)[:3]
 
     embed = discord.Embed(
         title=f"📊 Estimation — {article}",
@@ -150,8 +177,11 @@ async def estimer(
     if top:
         lignes = []
         for i in top:
-            titre = (i.title or "Sans titre")[:45]
-            lignes.append(f"[{titre}]({i.url}) — {i.price} € — ❤️ {getattr(i, 'favourite_count', 0)}")
+            titre = (_champ(i, "title") or "Sans titre")[:45]
+            url = _champ(i, "url", "")
+            prix_affiche = _prix_de(i)
+            favs = _champ(i, "favourite_count", 0) or 0
+            lignes.append(f"[{titre}]({url}) — {prix_affiche} € — ❤️ {favs}")
         embed.add_field(name="Annonces les plus populaires (référence)", value="\n".join(lignes), inline=False)
 
     embed.set_footer(text="Données publiques Vinted, à titre indicatif.")
