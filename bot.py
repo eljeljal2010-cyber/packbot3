@@ -1,10 +1,11 @@
 import os
 import statistics
 import asyncio
+from urllib.parse import quote
 import discord
 from discord import app_commands
 from discord.ext import commands
-from vinted import Vinted
+from vinted import VintedClient, VintedRateLimitError, VintedNetworkError, VintedAPIError, VintedError
 
 # --- Configuration de base ---
 intents = discord.Intents.default()
@@ -102,34 +103,33 @@ async def estimer(
     print(f"[estimer] requête envoyée à Vinted : {requete!r}")
 
     try:
-        def _rechercher():
-            vinted = Vinted(domain="vinted.fr")
-            return vinted.search(query=requete, per_page=50)
+        url = f"https://www.vinted.fr/catalog?search_text={quote(requete)}&order=relevance"
 
-        # On lance la recherche dans un thread à part (ça évite de geler le bot),
-        # avec un maximum de 20 secondes d'attente.
-        resultat = await asyncio.wait_for(asyncio.to_thread(_rechercher), timeout=20)
+        async def _rechercher():
+            async with VintedClient() as client:
+                return await client.search_items(url=url, per_page=50, raw_data=True)
 
-        # Le format renvoyé par la librairie peut varier (objet avec .items, ou dict brut
-        # avec une clé "items"). On gère les deux cas pour être robuste.
-        if isinstance(resultat, list):
-            items = resultat
-        else:
-            items = _champ(resultat, "items", [])
-            if callable(items):  # ex: resultat.items est en fait dict.items (méthode)
-                items = list(resultat.get("items", [])) if isinstance(resultat, dict) else []
+        # Maximum 20 secondes d'attente
+        items = await asyncio.wait_for(_rechercher(), timeout=20)
+        print(f"[estimer] nb_items={len(items) if items else 0}")
 
-        print(f"[estimer] type(resultat)={type(resultat)} nb_items={len(items) if items else 0}")
     except asyncio.TimeoutError:
         await interaction.followup.send(
-            "⏱️ Vinted met trop de temps à répondre (probablement un blocage anti-bot temporaire). "
+            "⏱️ Vinted met trop de temps à répondre. Réessaie dans quelques minutes."
+        )
+        return
+    except VintedRateLimitError:
+        await interaction.followup.send(
+            "🚫 Vinted a temporairement limité les requêtes (trop de recherches d'un coup). "
             "Réessaie dans quelques minutes."
         )
         return
+    except (VintedNetworkError, VintedAPIError, VintedError) as e:
+        await interaction.followup.send(f"❌ Erreur Vinted : `{e}`")
+        return
     except Exception as e:
         await interaction.followup.send(
-            f"❌ Erreur pendant la recherche sur Vinted (le site a peut-être temporairement bloqué "
-            f"la requête, réessaie dans quelques minutes) : `{e}`"
+            f"❌ Erreur inattendue pendant la recherche : `{e}`"
         )
         return
 
