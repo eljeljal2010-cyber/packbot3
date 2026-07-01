@@ -84,17 +84,17 @@ async def poster(interaction: discord.Interaction, titre: str, texte: str, lien:
 # --- La commande slash /estimer ---
 @bot.tree.command(name="estimer", description="Estime le prix de vente d'un article à partir d'annonces Vinted comparables")
 @app_commands.describe(
-    photo="Photo de l'article à vendre (affichée avec le résultat)",
     article="Description courte de l'article (ex: pull zara laine col rond)",
     marque="Marque de l'article (optionnel, améliore la précision)",
-    taille="Taille de l'article (optionnel)"
+    taille="Taille de l'article (optionnel)",
+    photo="Photo de l'article à vendre (optionnel, juste pour l'affichage)"
 )
 async def estimer(
     interaction: discord.Interaction,
-    photo: discord.Attachment,
     article: str,
     marque: str = None,
     taille: str = None,
+    photo: discord.Attachment = None,
 ):
     # La recherche peut prendre quelques secondes, on prévient Discord qu'on répondra plus tard
     await interaction.response.defer(thinking=True)
@@ -168,7 +168,8 @@ async def estimer(
         description=f"Basé sur {len(items)} annonces comparables trouvées sur Vinted",
         color=discord.Color.green(),
     )
-    embed.set_image(url=photo.url)
+    if photo:
+        embed.set_thumbnail(url=photo.url)
     embed.add_field(name="Prix moyen", value=f"{prix_moyen:.2f} €", inline=True)
     embed.add_field(name="Prix médian", value=f"{prix_median:.2f} €", inline=True)
     embed.add_field(name="Fourchette", value=f"{prix_min:.2f} € – {prix_max:.2f} €", inline=True)
