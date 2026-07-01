@@ -11,21 +11,12 @@ from vinted import VintedClient, VintedRateLimitError, VintedNetworkError, Vinte
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+GUILD_ID = os.environ.get("GUILD_ID")
 
-# --- Le bouton "Accès au lien" ---
-class LinkButtonView(discord.ui.View):
-    def __init__(self, lien: str):
-        super().__init__(timeout=None)  # le bouton reste actif indéfiniment
-        self.lien = lien
 
-    @discord.ui.button(label="Accès au lien", style=discord.ButtonStyle.primary, emoji="🔗")
-    async def reveal_link(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # ephemeral=True => seul celui qui clique voit le message
-        await interaction.response.send_message(
-            f"🔗 **Lien :** {self.lien}",
-            ephemeral=True
-        )
-
+# ============================================================
+#  Fonctions utilitaires
+# ============================================================
 
 def _champ(obj, cle, defaut=None):
     """Récupère un champ que 'obj' soit un dict (JSON brut) ou un objet avec attributs."""
@@ -45,14 +36,117 @@ def _prix_de(obj):
         return None
 
 
-GUILD_ID = os.environ.get("GUILD_ID")
+def _photo_de(obj):
+    """Récupère l'URL de la photo principale d'une annonce, quel que soit le format renvoyé."""
+    photo = _champ(obj, "photo")
+    if isinstance(photo, dict):
+        return photo.get("url") or photo.get("full_size_url")
+    if isinstance(photo, list) and photo:
+        premiere = photo[0]
+        if isinstance(premiere, dict):
+            return premiere.get("url") or premiere.get("full_size_url")
+        if isinstance(premiere, str):
+            return premiere
+    if isinstance(photo, str):
+        return photo
+    return None
 
+
+def _favoris_de(obj):
+    return _champ(obj, "favourite_count", 0) or 0
+
+
+def _filtrer_valeurs_extremes(prix_valides):
+    """
+    Retire les prix aberrants (méthode IQR) qui fausseraient la moyenne,
+    par exemple une annonce à 3€ perdue au milieu d'annonces à 40€.
+    Retourne (liste_filtrée, nombre_exclu).
+    """
+    if len(prix_valides) < 4:
+        return prix_valides, 0
+
+    trie = sorted(prix_valides)
+    q1, q3 = statistics.quantiles(trie, n=4)[0], statistics.quantiles(trie, n=4)[2]
+    iqr = q3 - q1
+    borne_basse = q1 - 1.5 * iqr
+    borne_haute = q3 + 1.5 * iqr
+
+    filtres = [p for p in prix_valides if borne_basse <= p <= borne_haute]
+    if not filtres:  # sécurité, ne devrait pas arriver
+        return prix_valides, 0
+    return filtres, len(prix_valides) - len(filtres)
+
+
+# ============================================================
+#  Vue : bouton "Accès au lien" (masqué jusqu'au clic)
+# ============================================================
+
+class LinkButtonView(discord.ui.View):
+    def __init__(self, lien: str):
+        super().__init__(timeout=None)
+        self.lien = lien
+
+    @discord.ui.button(label="Accès au lien", style=discord.ButtonStyle.primary, emoji="🔗")
+    async def reveal_link(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            f"🔗 **Lien :** {self.lien}",
+            ephemeral=True
+        )
+
+
+# ============================================================
+#  Modal + Vue : bouton "Publier cette annonce" depuis /estimer
+# ============================================================
+
+class LienModal(discord.ui.Modal, title="Publier l'annonce"):
+    lien = discord.ui.TextInput(
+        label="Lien de l'annonce (Vinted, etc.)",
+        placeholder="https://...",
+        required=True,
+        max_length=300,
+    )
+
+    def __init__(self, article: str, prix_conseille: float, photo_url: str = None):
+        super().__init__()
+        self.article = article
+        self.prix_conseille = prix_conseille
+        self.photo_url = photo_url
+
+    async def on_submit(self, interaction: discord.Interaction):
+        texte = (
+            f"**{self.article}**\n\n"
+            f"💰 Prix conseillé : **{self.prix_conseille:.2f} €**\n"
+            f"Clique sur le bouton ci-dessous pour accéder au lien de l'annonce."
+        )
+        embed = discord.Embed(title=self.article, description=texte, color=discord.Color.blurple())
+        if self.photo_url:
+            embed.set_image(url=self.photo_url)
+        view = LinkButtonView(self.lien.value)
+        await interaction.response.send_message(embed=embed, view=view)
+
+
+class PublierView(discord.ui.View):
+    def __init__(self, article: str, prix_conseille: float, photo_url: str = None):
+        super().__init__(timeout=300)  # bouton valable 5 minutes après le résultat
+        self.article = article
+        self.prix_conseille = prix_conseille
+        self.photo_url = photo_url
+
+    @discord.ui.button(label="Publier cette annonce", style=discord.ButtonStyle.success, emoji="📋")
+    async def publier(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            LienModal(self.article, self.prix_conseille, self.photo_url)
+        )
+
+
+# ============================================================
+#  Démarrage du bot
+# ============================================================
 
 @bot.event
 async def on_ready():
     try:
         if GUILD_ID:
-            # Synchronisation sur un seul serveur = instantanée (pas d'attente d'1h)
             guild = discord.Object(id=int(GUILD_ID))
             bot.tree.copy_global_to(guild=guild)
             synced = await bot.tree.sync(guild=guild)
@@ -64,7 +158,10 @@ async def on_ready():
     print(f"Connecté en tant que {bot.user} — bot prêt.")
 
 
-# --- La commande slash /poster ---
+# ============================================================
+#  Commande /poster
+# ============================================================
+
 @bot.tree.command(name="poster", description="Crée une annonce avec titre, texte encadré et bouton lien caché")
 @app_commands.describe(
     titre="Le titre affiché en haut de l'annonce",
@@ -72,21 +169,21 @@ async def on_ready():
     lien="Le lien qui sera révélé uniquement au clic (visible seulement par la personne qui clique)"
 )
 async def poster(interaction: discord.Interaction, titre: str, texte: str, lien: str):
-    embed = discord.Embed(
-        title=titre,
-        description=texte,
-        color=discord.Color.blurple()
-    )
+    embed = discord.Embed(title=titre, description=texte, color=discord.Color.blurple())
     view = LinkButtonView(lien)
     await interaction.response.send_message(embed=embed, view=view)
 
 
-# --- La commande slash /estimer ---
+# ============================================================
+#  Commande /estimer
+# ============================================================
+
 @bot.tree.command(name="estimer", description="Estime le prix de vente d'un article à partir d'annonces Vinted comparables")
 @app_commands.describe(
     article="Description courte de l'article (ex: pull zara laine col rond)",
     marque="Marque de l'article (optionnel, améliore la précision)",
     taille="Taille de l'article (optionnel)",
+    etat="État de l'article (ex: neuf, très bon état, bon état)",
     photo="Photo de l'article à vendre (optionnel, juste pour l'affichage)"
 )
 async def estimer(
@@ -94,12 +191,12 @@ async def estimer(
     article: str,
     marque: str = None,
     taille: str = None,
+    etat: str = None,
     photo: discord.Attachment = None,
 ):
-    # La recherche peut prendre quelques secondes, on prévient Discord qu'on répondra plus tard
     await interaction.response.defer(thinking=True)
 
-    requete = " ".join(filter(None, [marque, article, taille]))
+    requete = " ".join(filter(None, [marque, article, taille, etat]))
     print(f"[estimer] requête envoyée à Vinted : {requete!r}")
 
     try:
@@ -109,14 +206,11 @@ async def estimer(
             async with VintedClient() as client:
                 return await client.search_items(url=url, per_page=50, raw_data=True)
 
-        # Maximum 20 secondes d'attente
         items = await asyncio.wait_for(_rechercher(), timeout=20)
         print(f"[estimer] nb_items={len(items) if items else 0}")
 
     except asyncio.TimeoutError:
-        await interaction.followup.send(
-            "⏱️ Vinted met trop de temps à répondre. Réessaie dans quelques minutes."
-        )
+        await interaction.followup.send("⏱️ Vinted met trop de temps à répondre. Réessaie dans quelques minutes.")
         return
     except VintedRateLimitError:
         await interaction.followup.send(
@@ -128,67 +222,75 @@ async def estimer(
         await interaction.followup.send(f"❌ Erreur Vinted : `{e}`")
         return
     except Exception as e:
-        await interaction.followup.send(
-            f"❌ Erreur inattendue pendant la recherche : `{e}`"
-        )
+        await interaction.followup.send(f"❌ Erreur inattendue pendant la recherche : `{e}`")
         return
 
     if not items:
         await interaction.followup.send("Aucune annonce comparable trouvée. Essaie une description plus générale.")
         return
 
-    # Nettoyage des prix (parfois vides ou mal formatés)
-    prix_valides = []
-    for i in items:
-        p = _prix_de(i)
-        if p is not None:
-            prix_valides.append(p)
-
-    if not prix_valides:
+    # --- Prix ---
+    prix_bruts = [p for p in (_prix_de(i) for i in items) if p is not None]
+    if not prix_bruts:
         await interaction.followup.send("Impossible de récupérer des prix exploitables sur ces annonces.")
         return
 
-    favoris = [_champ(i, "favourite_count", 0) or 0 for i in items]
+    prix_filtres, nb_exclus = _filtrer_valeurs_extremes(prix_bruts)
 
-    prix_moyen = statistics.mean(prix_valides)
-    prix_median = statistics.median(prix_valides)
-    prix_min = min(prix_valides)
-    prix_max = max(prix_valides)
+    prix_moyen = statistics.mean(prix_filtres)
+    prix_median = statistics.median(prix_filtres)
+    prix_min = min(prix_filtres)
+    prix_max = max(prix_filtres)
+
+    favoris = [_favoris_de(i) for i in items]
     demande_moyenne = statistics.mean(favoris) if favoris else 0
 
-    # Prix conseillé : légèrement sous le médian pour vendre plus vite,
-    # jamais en dessous du minimum observé
+    # Prix conseillé : légèrement sous le médian (nettoyé des valeurs extrêmes) pour vendre plus vite
     prix_conseille = max(round(prix_median * 0.95, 2), prix_min)
 
-    # Les 3 annonces comparables qui ont le plus de favoris = les plus "demandées"
-    top = sorted(items, key=lambda i: _champ(i, "favourite_count", 0) or 0, reverse=True)[:3]
+    # Les 3 annonces comparables les plus "demandées" (le plus de favoris)
+    top = sorted(items, key=_favoris_de, reverse=True)[:3]
 
-    embed = discord.Embed(
+    # --- Embed principal (statistiques) ---
+    embed_principal = discord.Embed(
         title=f"📊 Estimation — {article}",
-        description=f"Basé sur {len(items)} annonces comparables trouvées sur Vinted",
+        description=f"Basé sur {len(items)} annonces comparables trouvées sur Vinted"
+        + (f" ({nb_exclus} valeur(s) extrême(s) exclue(s) du calcul)" if nb_exclus else ""),
         color=discord.Color.green(),
     )
     if photo:
-        embed.set_thumbnail(url=photo.url)
-    embed.add_field(name="Prix moyen", value=f"{prix_moyen:.2f} €", inline=True)
-    embed.add_field(name="Prix médian", value=f"{prix_median:.2f} €", inline=True)
-    embed.add_field(name="Fourchette", value=f"{prix_min:.2f} € – {prix_max:.2f} €", inline=True)
-    embed.add_field(name="❤️ Favoris moyens (demande)", value=f"{demande_moyenne:.1f}", inline=True)
-    embed.add_field(name="💡 Prix conseillé pour vendre vite", value=f"**{prix_conseille:.2f} €**", inline=False)
+        embed_principal.set_thumbnail(url=photo.url)
+    embed_principal.add_field(name="Prix moyen", value=f"{prix_moyen:.2f} €", inline=True)
+    embed_principal.add_field(name="Prix médian", value=f"{prix_median:.2f} €", inline=True)
+    embed_principal.add_field(name="Fourchette", value=f"{prix_min:.2f} € – {prix_max:.2f} €", inline=True)
+    embed_principal.add_field(name="❤️ Favoris moyens (demande)", value=f"{demande_moyenne:.1f}", inline=True)
+    embed_principal.add_field(name="💡 Prix conseillé pour vendre vite", value=f"**{prix_conseille:.2f} €**", inline=False)
+    embed_principal.set_footer(text="Données publiques Vinted, à titre indicatif.")
 
-    if top:
-        lignes = []
-        for i in top:
-            titre = (_champ(i, "title") or "Sans titre")[:45]
-            url = _champ(i, "url", "")
-            prix_affiche = _prix_de(i)
-            favs = _champ(i, "favourite_count", 0) or 0
-            lignes.append(f"[{titre}]({url}) — {prix_affiche} € — ❤️ {favs}")
-        embed.add_field(name="Annonces les plus populaires (référence)", value="\n".join(lignes), inline=False)
+    # --- Un embed par annonce populaire, avec sa photo ---
+    embeds = [embed_principal]
+    for i in top:
+        titre_annonce = _champ(i, "title") or "Sans titre"
+        url_annonce = _champ(i, "url", "")
+        prix_annonce = _prix_de(i)
+        favs = _favoris_de(i)
+        photo_annonce = _photo_de(i)
 
-    embed.set_footer(text="Données publiques Vinted, à titre indicatif.")
+        e = discord.Embed(
+            title=titre_annonce[:100],
+            url=url_annonce or None,
+            description=f"{prix_annonce} € — ❤️ {favs} favoris",
+            color=discord.Color.blurple(),
+        )
+        if photo_annonce:
+            e.set_thumbnail(url=photo_annonce)
+        embeds.append(e)
 
-    await interaction.followup.send(embed=embed)
+    # --- Bouton pour publier directement l'annonce avec le prix conseillé ---
+    photo_pour_publication = photo.url if photo else (_photo_de(top[0]) if top else None)
+    view = PublierView(article, prix_conseille, photo_pour_publication)
+
+    await interaction.followup.send(embeds=embeds, view=view)
 
 
 if __name__ == "__main__":
