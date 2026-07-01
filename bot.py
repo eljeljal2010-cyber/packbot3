@@ -99,10 +99,11 @@ async def estimer(
     await interaction.response.defer(thinking=True)
 
     requete = " ".join(filter(None, [marque, article, taille]))
+    print(f"[estimer] requête envoyée à Vinted : {requete!r}")
 
     try:
         def _rechercher():
-            vinted = Vinted(domain="fr")
+            vinted = Vinted(domain="vinted.fr")
             return vinted.search(query=requete, per_page=50)
 
         # On lance la recherche dans un thread à part (ça évite de geler le bot),
