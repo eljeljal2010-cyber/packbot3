@@ -25,10 +25,19 @@ class LinkButtonView(discord.ui.View):
         )
 
 
+GUILD_ID = os.environ.get("GUILD_ID")
+
+
 @bot.event
 async def on_ready():
     try:
-        synced = await bot.tree.sync()
+        if GUILD_ID:
+            # Synchronisation sur un seul serveur = instantanée (pas d'attente d'1h)
+            guild = discord.Object(id=int(GUILD_ID))
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+        else:
+            synced = await bot.tree.sync()
         print(f"{len(synced)} commande(s) synchronisée(s).")
     except Exception as e:
         print(f"Erreur de synchronisation : {e}")
