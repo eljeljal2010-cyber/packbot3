@@ -96,51 +96,6 @@ class LinkButtonView(discord.ui.View):
 
 
 # ============================================================
-#  Modal + Vue : bouton "Publier cette annonce" depuis /estimer
-# ============================================================
-
-class LienModal(discord.ui.Modal, title="Publier l'annonce"):
-    lien = discord.ui.TextInput(
-        label="Lien de l'annonce (Vinted, etc.)",
-        placeholder="https://...",
-        required=True,
-        max_length=300,
-    )
-
-    def __init__(self, article: str, prix_conseille: float, photo_url: str = None):
-        super().__init__()
-        self.article = article
-        self.prix_conseille = prix_conseille
-        self.photo_url = photo_url
-
-    async def on_submit(self, interaction: discord.Interaction):
-        texte = (
-            f"**{self.article}**\n\n"
-            f"💰 Prix conseillé : **{self.prix_conseille:.2f} €**\n"
-            f"Clique sur le bouton ci-dessous pour accéder au lien de l'annonce."
-        )
-        embed = discord.Embed(title=self.article, description=texte, color=discord.Color.blurple())
-        if self.photo_url:
-            embed.set_image(url=self.photo_url)
-        view = LinkButtonView(self.lien.value)
-        await interaction.response.send_message(embed=embed, view=view)
-
-
-class PublierView(discord.ui.View):
-    def __init__(self, article: str, prix_conseille: float, photo_url: str = None):
-        super().__init__(timeout=300)  # bouton valable 5 minutes après le résultat
-        self.article = article
-        self.prix_conseille = prix_conseille
-        self.photo_url = photo_url
-
-    @discord.ui.button(label="Publier cette annonce", style=discord.ButtonStyle.success, emoji="📋")
-    async def publier(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(
-            LienModal(self.article, self.prix_conseille, self.photo_url)
-        )
-
-
-# ============================================================
 #  Démarrage du bot
 # ============================================================
 
@@ -309,11 +264,7 @@ async def estimer(
             e.set_image(url=photo_annonce)
         embeds.append(e)
 
-    # --- Bouton pour publier directement l'annonce avec le prix conseillé ---
-    photo_pour_publication = photo.url if photo else (_photo_de(top[0]) if top else None)
-    view = PublierView(article, prix_conseille, photo_pour_publication)
-
-    await interaction.followup.send(embeds=embeds, view=view)
+    await interaction.followup.send(embeds=embeds)
 
 
 if __name__ == "__main__":
