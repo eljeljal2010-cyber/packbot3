@@ -1,6 +1,7 @@
 import os
 import statistics
 import asyncio
+from typing import Optional
 from urllib.parse import quote
 import discord
 from discord import app_commands
@@ -189,10 +190,10 @@ async def poster(interaction: discord.Interaction, titre: str, texte: str, lien:
 async def estimer(
     interaction: discord.Interaction,
     article: str,
-    marque: str = None,
-    taille: str = None,
-    etat: str = None,
-    photo: discord.Attachment = None,
+    marque: Optional[str] = None,
+    taille: Optional[str] = None,
+    etat: Optional[str] = None,
+    photo: Optional[discord.Attachment] = None,
 ):
     await interaction.response.defer(thinking=True)
 
@@ -252,24 +253,46 @@ async def estimer(
     top = sorted(items, key=_favoris_de, reverse=True)[:3]
 
     # --- Embed principal (statistiques) ---
+    barre = "▰" * min(10, round(demande_moyenne / 5)) + "▱" * (10 - min(10, round(demande_moyenne / 5)))
+
     embed_principal = discord.Embed(
-        title=f"📊 Estimation — {article}",
-        description=f"Basé sur {len(items)} annonces comparables trouvées sur Vinted"
-        + (f" ({nb_exclus} valeur(s) extrême(s) exclue(s) du calcul)" if nb_exclus else ""),
-        color=discord.Color.green(),
+        title="📊 Estimation de prix",
+        color=discord.Color.from_rgb(30, 200, 120),
     )
+    embed_principal.add_field(name="🛍️ Article", value=f"**{article}**", inline=False)
+    embed_principal.add_field(name="💶 Prix moyen", value=f"{prix_moyen:.2f} €", inline=True)
+    embed_principal.add_field(name="📍 Prix médian", value=f"{prix_median:.2f} €", inline=True)
+    embed_principal.add_field(name="↔️ Fourchette", value=f"{prix_min:.2f} € – {prix_max:.2f} €", inline=True)
+    embed_principal.add_field(
+        name="❤️ Demande",
+        value=f"{barre}\n{demande_moyenne:.0f} favoris en moyenne",
+        inline=False,
+    )
+    embed_principal.add_field(
+        name="💡 Prix conseillé pour vendre rapidement",
+        value=f"## {prix_conseille:.2f} €",
+        inline=False,
+    )
+    sous_texte = f"Basé sur {len(items)} annonces comparables"
+    if nb_exclus:
+        sous_texte += f" ({nb_exclus} valeur(s) extrême(s) écartée(s) du calcul)"
+    embed_principal.set_footer(text=f"{sous_texte} • Données publiques Vinted, à titre indicatif")
     if photo:
         embed_principal.set_thumbnail(url=photo.url)
-    embed_principal.add_field(name="Prix moyen", value=f"{prix_moyen:.2f} €", inline=True)
-    embed_principal.add_field(name="Prix médian", value=f"{prix_median:.2f} €", inline=True)
-    embed_principal.add_field(name="Fourchette", value=f"{prix_min:.2f} € – {prix_max:.2f} €", inline=True)
-    embed_principal.add_field(name="❤️ Favoris moyens (demande)", value=f"{demande_moyenne:.1f}", inline=True)
-    embed_principal.add_field(name="💡 Prix conseillé pour vendre vite", value=f"**{prix_conseille:.2f} €**", inline=False)
-    embed_principal.set_footer(text="Données publiques Vinted, à titre indicatif.")
 
-    # --- Un embed par annonce populaire, avec sa photo ---
+    # --- Un embed par annonce populaire, avec sa photo en grand ---
+    medailles = ["🥇", "🥈", "🥉"]
+    couleurs = [discord.Color.gold(), discord.Color.light_grey(), discord.Color.dark_orange()]
     embeds = [embed_principal]
-    for i in top:
+
+    if top:
+        separateur = discord.Embed(
+            description="### 🔥 Annonces comparables les plus demandées",
+            color=discord.Color.from_rgb(88, 101, 242),
+        )
+        embeds.append(separateur)
+
+    for idx, i in enumerate(top):
         titre_annonce = _champ(i, "title") or "Sans titre"
         url_annonce = _champ(i, "url", "")
         prix_annonce = _prix_de(i)
@@ -277,13 +300,13 @@ async def estimer(
         photo_annonce = _photo_de(i)
 
         e = discord.Embed(
-            title=titre_annonce[:100],
+            title=f"{medailles[idx]} {titre_annonce[:90]}",
             url=url_annonce or None,
-            description=f"{prix_annonce} € — ❤️ {favs} favoris",
-            color=discord.Color.blurple(),
+            description=f"**{prix_annonce} €**   •   ❤️ {favs} favoris",
+            color=couleurs[idx],
         )
         if photo_annonce:
-            e.set_thumbnail(url=photo_annonce)
+            e.set_image(url=photo_annonce)
         embeds.append(e)
 
     # --- Bouton pour publier directement l'annonce avec le prix conseillé ---
