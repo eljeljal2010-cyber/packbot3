@@ -1,5 +1,6 @@
 import os
 import statistics
+import asyncio
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -82,9 +83,20 @@ async def estimer(
     requete = " ".join(filter(None, [marque, article, taille]))
 
     try:
-        vinted = Vinted(domain="fr")
-        resultat = vinted.search(query=requete, per_page=50)
+        def _rechercher():
+            vinted = Vinted(domain="fr")
+            return vinted.search(query=requete, per_page=50)
+
+        # On lance la recherche dans un thread à part (ça évite de geler le bot),
+        # avec un maximum de 20 secondes d'attente.
+        resultat = await asyncio.wait_for(asyncio.to_thread(_rechercher), timeout=20)
         items = resultat.items
+    except asyncio.TimeoutError:
+        await interaction.followup.send(
+            "⏱️ Vinted met trop de temps à répondre (probablement un blocage anti-bot temporaire). "
+            "Réessaie dans quelques minutes."
+        )
+        return
     except Exception as e:
         await interaction.followup.send(
             f"❌ Erreur pendant la recherche sur Vinted (le site a peut-être temporairement bloqué "
