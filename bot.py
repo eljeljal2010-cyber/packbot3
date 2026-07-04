@@ -33,20 +33,25 @@ groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 # llama-4-scout-17b-16e-instruct l'est aussi (arrêt prévu le 17/07/2026) : on utilise
 # directement les remplacements officiels recommandés par Groq, redéfinissables via
 # variable d'environnement au cas où Groq change encore d'avis d'ici là.
-MODELE_CHAT = os.environ.get("GROQ_CHAT_MODEL", "openai/gpt-oss-120b")
+MODELE_REDACTION = os.environ.get("GROQ_REDACTION_MODEL", "openai/gpt-oss-120b")
 MODELE_VISION = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")  # gpt-oss-120b ne gère pas les images
+# groq/compound = système agentique qui ajoute recherche web temps réel + exécution de code
+# par-dessus des modèles puissants (GPT-OSS 120B, Llama 4/3.3) : plus capable ET informé en direct.
+MODELE_CONVERSATION = os.environ.get("GROQ_CONVERSATION_MODEL", "groq/compound")
+# Modèle rapide/économique dédié aux résumés de mémoire (pas besoin de puissance ici).
+MODELE_RESUME = os.environ.get("GROQ_RESUME_MODEL", "llama-3.1-8b-instant")
 
 
 def _options_raisonnement(modele: str) -> dict:
     """openai/gpt-oss-* et qwen3.x sont des modèles 'raisonneurs' : ils réfléchissent dans un champ
-    caché avant de répondre. Avec un effort de raisonnement par défaut, ils peuvent épuiser tout le
-    budget de tokens dans la réflexion et renvoyer un `content` final vide. On réduit cet effort au
-    minimum ici, puisqu'on n'a pas besoin de raisonnement complexe pour du chat ou de la rédaction."""
+    caché avant de répondre. On vise un effort 'medium'/'low' (plutôt que le minimum) pour de
+    meilleures réponses, tout en gardant les filets de sécurité existants (retry en texte seul,
+    retry si réponse vide) qui absorbent le risque que le raisonnement consomme trop de budget."""
     modele_lower = modele.lower()
     if "gpt-oss" in modele_lower:
-        return {"reasoning_effort": "low"}
+        return {"reasoning_effort": "medium"}
     if "qwen3" in modele_lower:
-        return {"reasoning_effort": "none"}
+        return {"reasoning_effort": "low"}
     return {}
 
 
@@ -61,8 +66,51 @@ async def _appeler_groq(**kwargs):
         if options:
             return await asyncio.to_thread(groq_client.chat.completions.create, **kwargs)
         raise
-HISTORIQUE_MAX = 10  # nombre de messages gardés en mémoire par salon
+HISTORIQUE_MAX = 16  # nombre de messages bruts gardés en mémoire par salon
+HISTORIQUE_SEUIL_RESUME = 20  # au-delà, on condense les plus anciens en résumé
+HISTORIQUE_GARDE_APRES_RESUME = 10  # nombre de messages bruts gardés après condensation
+RESUME_MAX_CARACTERES = 2000  # taille max du résumé cumulé, pour ne pas gonfler indéfiniment
 historique_conversations = {}  # {channel_id: [ {"role": ..., "content": ...}, ... ]}
+resume_conversations = {}  # {channel_id: "résumé condensé des échanges plus anciens"}
+
+
+async def _maj_resume_si_necessaire(channel_id):
+    """Si l'historique brut devient trop long, condense les messages les plus anciens en un résumé
+    (via un modèle rapide/économique) pour que le bot 'se souvienne' de loin sans faire exploser le
+    nombre de tokens envoyés à chaque appel."""
+    historique = historique_conversations.get(channel_id, [])
+    if len(historique) <= HISTORIQUE_SEUIL_RESUME:
+        return
+
+    a_condenser = historique[:-HISTORIQUE_GARDE_APRES_RESUME]
+    texte_a_condenser = "\n".join(f"{m['role']} : {m['content']}" for m in a_condenser)
+
+    try:
+        reponse = await _appeler_groq(
+            model=MODELE_RESUME,
+            max_tokens=400,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Condense cette portion de conversation Discord en un résumé dense de quelques "
+                        "phrases, en gardant uniquement les informations utiles pour la suite (préférences "
+                        "de la personne, articles évoqués, prix discutés, décisions prises). Pas de "
+                        "formule d'introduction, juste les faits utiles."
+                    ),
+                },
+                {"role": "user", "content": texte_a_condenser},
+            ],
+        )
+        nouveau_bout = (reponse.choices[0].message.content or "").strip()
+        if nouveau_bout:
+            ancien_resume = resume_conversations.get(channel_id, "")
+            fusion = f"{ancien_resume}\n{nouveau_bout}".strip()
+            resume_conversations[channel_id] = fusion[-RESUME_MAX_CARACTERES:]
+    except Exception as e:
+        print(f"[chat] échec du résumé de mémoire : {e}")
+
+    historique_conversations[channel_id] = historique[-HISTORIQUE_GARDE_APRES_RESUME:]
 
 STYLES = {
     "marseillais": {
@@ -340,10 +388,17 @@ async def on_message(message: discord.Message):
 
         try:
             style_key = _style_du_salon(message.channel.id)
-            messages_api = [{"role": "system", "content": STYLES[style_key]["prompt"]}] + historique
+            messages_api = [{"role": "system", "content": STYLES[style_key]["prompt"]}]
+            resume = resume_conversations.get(message.channel.id)
+            if resume:
+                messages_api.append({
+                    "role": "system",
+                    "content": f"Résumé des échanges précédents dans ce salon (pour mémoire) : {resume}",
+                })
+            messages_api += historique
             reponse = await _appeler_groq(
-                model=MODELE_CHAT,
-                max_tokens=1000,
+                model=MODELE_CONVERSATION,
+                max_tokens=1200,
                 messages=messages_api,
             )
             texte_reponse = reponse.choices[0].message.content or ""
@@ -356,6 +411,7 @@ async def on_message(message: discord.Message):
 
         historique.append({"role": "assistant", "content": texte_reponse})
         del historique[:-HISTORIQUE_MAX]
+        await _maj_resume_si_necessaire(message.channel.id)
 
         for i in range(0, len(texte_reponse), 1900):
             await message.reply(texte_reponse[i:i + 1900])
@@ -364,6 +420,7 @@ async def on_message(message: discord.Message):
 @bot.tree.command(name="reset_chat", description="Efface la mémoire de conversation du chat IA dans ce salon")
 async def reset_chat(interaction: discord.Interaction):
     historique_conversations.pop(interaction.channel_id, None)
+    resume_conversations.pop(interaction.channel_id, None)
     await interaction.response.send_message("🧹 Mémoire de conversation effacée pour ce salon.", ephemeral=True)
 
 
@@ -841,7 +898,7 @@ async def _generer_annonce(mots_cles: str, details: Optional[str], ton_key: str,
             modele = MODELE_VISION
         else:
             contenu_msg = texte_utilisateur
-            modele = MODELE_CHAT
+            modele = MODELE_REDACTION
 
         appel_kwargs = dict(
             model=modele,
