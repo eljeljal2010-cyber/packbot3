@@ -1,4 +1,5 @@
 import os
+import json
 import statistics
 import asyncio
 from typing import Optional
@@ -28,6 +29,7 @@ CHAT_CHANNEL_ID = os.environ.get("CHAT_CHANNEL_ID")  # si défini, le chat IA ne
 # --- Configuration du chat IA (Groq, gratuit) ---
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 MODELE_CHAT = "llama-3.3-70b-versatile"
+MODELE_VISION = os.environ.get("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 HISTORIQUE_MAX = 10  # nombre de messages gardés en mémoire par salon
 historique_conversations = {}  # {channel_id: [ {"role": ..., "content": ...}, ... ]}
 
@@ -94,6 +96,21 @@ style_actuel = {}  # {channel_id: style_key} — style courant du chat IA par sa
 
 def _style_du_salon(channel_id) -> str:
     return style_actuel.get(channel_id, STYLE_PAR_DEFAUT)
+
+
+# --- Tons disponibles pour le générateur de description d'annonce (/annonce) ---
+TONS_ANNONCE = {
+    "accrocheur": "dynamique et percutant, orienté vente, avec quelques emojis pertinents sans excès",
+    "sobre": "neutre et factuel, précis, avec très peu voire pas d'emojis, focus sur les caractéristiques concrètes",
+    "fun": "familier, complice avec l'acheteur, avec de l'humour léger et des emojis",
+}
+
+TONS_ANNONCE_LABELS = {
+    "accrocheur": "✨ Accrocheur",
+    "sobre": "📝 Sobre et factuel",
+    "fun": "😄 Fun / familier",
+    "personnalite": "🎭 Ma personnalité actuelle",
+}
 
 
 # ============================================================
@@ -590,6 +607,154 @@ class EstimerIntroView(discord.ui.View):
 
 
 # ============================================================
+#  Générateur de description Vinted (mots-clés + photo optionnelle)
+# ============================================================
+
+INSTRUCTION_SYSTEME_DESCRIPTION = (
+    "Tu es un copywriter expert des annonces Vinted en France. À partir de mots-clés (et d'une photo "
+    "si elle est fournie) et d'éventuels détails complémentaires, tu rédiges une annonce Vinted prête "
+    "à publier : accrocheuse, honnête et bien structurée, avec quelques emojis sobres et pertinents. "
+    "Mentionne l'état, la taille, la marque et la matière si l'info est donnée ou clairement visible "
+    "sur la photo, mais n'invente JAMAIS un détail que tu ne peux pas vérifier (ex: ne devine pas une "
+    "taille ou un défaut absent des informations fournies). Termine par 3-4 mots-clés de recherche "
+    "pertinents pour le référencement Vinted. Réponds STRICTEMENT dans ce format, sans aucun texte "
+    "avant ni après :\n"
+    "Titre: <titre accrocheur, 60 caractères max>\n\n"
+    "<description complète, prête à copier-coller>"
+)
+
+
+async def _generer_description(interaction: discord.Interaction, mots_cles: str, details: str, photo: Optional[discord.Attachment]):
+    texte_utilisateur = f"Mots-clés : {mots_cles.strip()}"
+    if details and details.strip():
+        texte_utilisateur += f"\nDétails complémentaires : {details.strip()}"
+
+    async def _appeler_groq(avec_photo: bool):
+        if avec_photo:
+            contenu = [
+                {"type": "text", "text": texte_utilisateur},
+                {"type": "image_url", "image_url": {"url": photo.url}},
+            ]
+            modele = MODELE_VISION
+        else:
+            contenu = texte_utilisateur
+            modele = MODELE_CHAT
+        reponse = await asyncio.to_thread(
+            groq_client.chat.completions.create,
+            model=modele,
+            max_tokens=700,
+            messages=[
+                {"role": "system", "content": INSTRUCTION_SYSTEME_DESCRIPTION},
+                {"role": "user", "content": contenu},
+            ],
+        )
+        return (reponse.choices[0].message.content or "").strip()
+
+    try:
+        texte_genere = await _appeler_groq(avec_photo=photo is not None)
+    except Exception as e:
+        if photo is not None:
+            # Le modèle vision peut être indisponible ou la photo mal supportée : on retente en texte seul.
+            try:
+                texte_genere = await _appeler_groq(avec_photo=False)
+            except Exception as e2:
+                await interaction.followup.send(f"❌ Erreur IA : `{e2}`", ephemeral=True)
+                return
+        else:
+            await interaction.followup.send(f"❌ Erreur IA : `{e}`", ephemeral=True)
+            return
+
+    if not texte_genere:
+        await interaction.followup.send("⚠️ Réponse vide, réessaie avec des mots-clés différents.", ephemeral=True)
+        return
+
+    # --- Extraction titre / description à partir du format demandé au modèle ---
+    titre_genere = "Sans titre"
+    corps = texte_genere
+    if texte_genere.lower().startswith("titre"):
+        premiere_ligne, _, reste = texte_genere.partition("\n")
+        titre_genere = premiere_ligne.split(":", 1)[-1].strip()
+        corps = reste.strip()
+
+    embed = discord.Embed(
+        title=f"📝 {titre_genere}",
+        description=corps[:4096],
+        color=discord.Color.from_rgb(255, 105, 180),
+    )
+    embed.set_footer(text="Généré par IA — relis avant de publier, notamment l'état et les mesures.")
+    if photo:
+        embed.set_thumbnail(url=photo.url)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+    # Bloc de texte brut, facile à copier-coller tel quel sur Vinted.
+    texte_brut = f"Titre : {titre_genere}\n\n{corps}"
+    for i in range(0, len(texte_brut), 1900):
+        await interaction.followup.send(f"```{texte_brut[i:i + 1900]}```", ephemeral=True)
+
+
+class DescriptionModal(discord.ui.Modal, title="📝 Générateur de description Vinted"):
+    mots_cles = discord.ui.TextInput(
+        label="Mots-clés (3-4 minimum)",
+        placeholder="ex: pull, nike, bleu, taille M",
+        required=True,
+        max_length=200,
+    )
+    details = discord.ui.TextInput(
+        label="Détails complémentaires (optionnel)",
+        style=discord.TextStyle.paragraph,
+        placeholder="marque, matière, mesures, état, défauts éventuels...",
+        required=False,
+        max_length=500,
+    )
+
+    def __init__(self, photo: Optional[discord.Attachment] = None):
+        super().__init__()
+        self.photo = photo
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        await _generer_description(
+            interaction,
+            mots_cles=self.mots_cles.value,
+            details=self.details.value,
+            photo=self.photo,
+        )
+
+
+class DescriptionIntroView(discord.ui.View):
+    def __init__(self, photo: Optional[discord.Attachment] = None):
+        super().__init__(timeout=None)
+        self.photo = photo
+
+    @discord.ui.button(label="Générer la description", style=discord.ButtonStyle.success, emoji="📝")
+    async def lancer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(DescriptionModal(photo=self.photo))
+
+
+@bot.tree.command(name="description", description="Génère une description Vinted accrocheuse à partir de mots-clés (+ photo optionnelle)")
+@app_commands.describe(photo="Photo de l'article (optionnel, aide l'IA à préciser couleur/matière/état)")
+async def description(interaction: discord.Interaction, photo: Optional[discord.Attachment] = None):
+    embed = discord.Embed(
+        title="📝 Générateur de description Vinted",
+        description=(
+            "Donne quelques mots-clés, et l'IA te rédige un titre + une description complète, "
+            "prête à coller sur Vinted.\n\n"
+            "**Comment ça marche ?**\n"
+            "1️⃣ Clique sur le bouton ci-dessous\n"
+            "2️⃣ Donne 3-4 mots-clés (ex: pull, nike, bleu, taille M)\n"
+            "3️⃣ Ajoute des détails si tu veux (marque, matière, défauts...)\n"
+            "4️⃣ Si tu as joint une photo à la commande, l'IA s'en sert pour affiner la description."
+        ),
+        color=discord.Color.from_rgb(255, 105, 180),
+    )
+    if photo:
+        embed.set_thumbnail(url=photo.url)
+    embed.set_footer(text="Généré par IA — pense à vérifier les infos avant de publier.")
+    view = DescriptionIntroView(photo=photo)
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+# ============================================================
 #  Commande /estimer — affiche l'explication + le bouton
 # ============================================================
 
@@ -617,6 +782,129 @@ async def estimer(interaction: discord.Interaction, photo: Optional[discord.Atta
 
     view = EstimerIntroView(photo=photo)
     await interaction.response.send_message(embed=embed, view=view)
+
+
+# ============================================================
+#  Générateur de description d'annonce (/annonce)
+# ============================================================
+
+def _prompt_ton_annonce(ton_key: str, channel_id) -> str:
+    if ton_key == "personnalite":
+        style_key = _style_du_salon(channel_id)
+        return (
+            f"Adopte le style de personnalité suivant, mais garde en tête qu'il s'agit de rédiger une "
+            f"annonce de vente (pas une conversation) : {STYLES[style_key]['prompt']}"
+        )
+    return TONS_ANNONCE.get(ton_key, TONS_ANNONCE["accrocheur"])
+
+
+async def _generer_annonce(mots_cles: str, details: Optional[str], ton_key: str, channel_id):
+    """Appelle Groq et retourne (titre, description). Lève une exception en cas d'échec de l'appel."""
+    description_ton = _prompt_ton_annonce(ton_key, channel_id)
+
+    instruction_systeme = (
+        "Tu es un copywriter expert spécialisé dans les annonces de vente d'articles d'occasion sur "
+        "Vinted, en France. À partir de mots-clés et d'infos éventuelles fournies par le vendeur, tu "
+        "rédiges une annonce prête à être publiée telle quelle.\n\n"
+        "Consignes strictes :\n"
+        "- Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, sans balises markdown.\n"
+        '- Format exact : {"titre": "...", "description": "..."}\n'
+        "- Le titre fait au maximum 60 caractères, percutant, avec les infos clés (marque, type, taille "
+        "si elles sont connues).\n"
+        "- La description fait entre 400 et 700 caractères, structurée en courtes phrases ou puces avec "
+        "quelques emojis pertinents (sans excès), met en valeur l'article, mentionne l'état s'il est "
+        "fourni, et se termine par une phrase qui donne envie d'acheter ou de poser une question.\n"
+        "- N'invente JAMAIS de détails factuels (marque, taille, défauts, matière) qui ne sont pas "
+        "donnés — reste vague plutôt que d'inventer.\n"
+        f"- Ton à adopter : {description_ton}"
+    )
+
+    message_utilisateur = f"Mots-clés : {mots_cles}\nInfos complémentaires : {details or 'aucune'}"
+
+    reponse = await asyncio.to_thread(
+        groq_client.chat.completions.create,
+        model=MODELE_CHAT,
+        max_tokens=500,
+        messages=[
+            {"role": "system", "content": instruction_systeme},
+            {"role": "user", "content": message_utilisateur},
+        ],
+    )
+    contenu = (reponse.choices[0].message.content or "").strip()
+
+    # Sécurité si le modèle entoure quand même sa réponse de ```json ... ```
+    if contenu.startswith("```"):
+        contenu = contenu.strip("`")
+        if contenu.lower().startswith("json"):
+            contenu = contenu[4:]
+        contenu = contenu.strip()
+
+    try:
+        data = json.loads(contenu)
+        titre = (data.get("titre") or mots_cles.title())[:100]
+        description = data.get("description") or contenu
+    except (json.JSONDecodeError, AttributeError):
+        # Filet de sécurité : si le JSON est mal formé, on utilise le texte brut comme description.
+        titre = mots_cles.title()[:100]
+        description = contenu
+
+    return titre, description
+
+
+class AnnonceView(discord.ui.View):
+    """Vue avec un bouton pour régénérer une nouvelle proposition d'annonce."""
+
+    def __init__(self, mots_cles: str, details: Optional[str], ton_key: str):
+        super().__init__(timeout=600)
+        self.mots_cles = mots_cles
+        self.details = details
+        self.ton_key = ton_key
+
+    @discord.ui.button(label="Régénérer", style=discord.ButtonStyle.secondary, emoji="🔄")
+    async def regenerer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(thinking=True, ephemeral=True)
+        await _envoyer_annonce(interaction, self.mots_cles, self.details, self.ton_key)
+
+
+async def _envoyer_annonce(interaction: discord.Interaction, mots_cles: str, details: Optional[str], ton_key: str):
+    try:
+        titre, description = await _generer_annonce(mots_cles, details, ton_key, interaction.channel_id)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Erreur IA : `{e}`", ephemeral=True)
+        return
+
+    embed = discord.Embed(title="📋 Annonce générée", color=discord.Color.from_rgb(88, 101, 242))
+    embed.add_field(name="✏️ Titre", value=f"**{titre}**", inline=False)
+    embed.add_field(name="📄 Description", value=f"```{description}```", inline=False)
+    embed.set_footer(
+        text=f"Ton : {TONS_ANNONCE_LABELS.get(ton_key, ton_key)} • Prêt à copier-coller sur Vinted ✅"
+    )
+
+    vue = AnnonceView(mots_cles, details, ton_key)
+    await interaction.followup.send(embed=embed, view=vue, ephemeral=True)
+
+
+@bot.tree.command(name="annonce", description="Génère un titre + une description Vinted à partir de mots-clés")
+@app_commands.describe(
+    mots_cles="3-4 mots-clés décrivant l'article (ex: robe fleurie été H&M taille S)",
+    details="Infos complémentaires optionnelles (état, défauts, mesures, prix...)",
+    ton="Ton de la description (par défaut : accrocheur)",
+)
+@app_commands.choices(ton=[
+    app_commands.Choice(name="✨ Accrocheur (par défaut)", value="accrocheur"),
+    app_commands.Choice(name="📝 Sobre et factuel", value="sobre"),
+    app_commands.Choice(name="😄 Fun / familier", value="fun"),
+    app_commands.Choice(name="🎭 Utiliser ma personnalité actuelle (/style)", value="personnalite"),
+])
+async def annonce(
+    interaction: discord.Interaction,
+    mots_cles: str,
+    details: Optional[str] = None,
+    ton: Optional[app_commands.Choice[str]] = None,
+):
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    ton_key = ton.value if ton else "accrocheur"
+    await _envoyer_annonce(interaction, mots_cles, details, ton_key)
 
 
 if __name__ == "__main__":
