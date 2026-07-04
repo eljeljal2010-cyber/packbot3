@@ -35,6 +35,32 @@ groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 # variable d'environnement au cas où Groq change encore d'avis d'ici là.
 MODELE_CHAT = os.environ.get("GROQ_CHAT_MODEL", "openai/gpt-oss-120b")
 MODELE_VISION = os.environ.get("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")  # gpt-oss-120b ne gère pas les images
+
+
+def _options_raisonnement(modele: str) -> dict:
+    """openai/gpt-oss-* et qwen3.x sont des modèles 'raisonneurs' : ils réfléchissent dans un champ
+    caché avant de répondre. Avec un effort de raisonnement par défaut, ils peuvent épuiser tout le
+    budget de tokens dans la réflexion et renvoyer un `content` final vide. On réduit cet effort au
+    minimum ici, puisqu'on n'a pas besoin de raisonnement complexe pour du chat ou de la rédaction."""
+    modele_lower = modele.lower()
+    if "gpt-oss" in modele_lower:
+        return {"reasoning_effort": "low"}
+    if "qwen3" in modele_lower:
+        return {"reasoning_effort": "none"}
+    return {}
+
+
+async def _appeler_groq(**kwargs):
+    """Appelle Groq en tentant d'abord avec les options de raisonnement réduites, puis se rabat sur
+    un appel simple si le modèle/l'API ne supporte pas ces paramètres."""
+    modele = kwargs.get("model", "")
+    options = _options_raisonnement(modele)
+    try:
+        return await asyncio.to_thread(groq_client.chat.completions.create, **{**kwargs, **options})
+    except Exception:
+        if options:
+            return await asyncio.to_thread(groq_client.chat.completions.create, **kwargs)
+        raise
 HISTORIQUE_MAX = 10  # nombre de messages gardés en mémoire par salon
 historique_conversations = {}  # {channel_id: [ {"role": ..., "content": ...}, ... ]}
 
@@ -289,10 +315,9 @@ async def on_message(message: discord.Message):
         try:
             style_key = _style_du_salon(message.channel.id)
             messages_api = [{"role": "system", "content": STYLES[style_key]["prompt"]}] + historique
-            reponse = await asyncio.to_thread(
-                groq_client.chat.completions.create,
+            reponse = await _appeler_groq(
                 model=MODELE_CHAT,
-                max_tokens=600,
+                max_tokens=1000,
                 messages=messages_api,
             )
             texte_reponse = reponse.choices[0].message.content or ""
@@ -747,23 +772,27 @@ async def _generer_annonce(mots_cles: str, details: Optional[str], ton_key: str,
 
         appel_kwargs = dict(
             model=modele,
-            max_tokens=600,
+            max_tokens=1200,  # marge suffisante pour le raisonnement interne + la réponse sur les modèles raisonneurs
             temperature=0.9,  # un peu de créativité en plus pour éviter un texte trop robotique/répétitif
             messages=[
                 {"role": "system", "content": instruction_systeme},
                 {"role": "user", "content": contenu_msg},
             ],
         )
+        options = _options_raisonnement(modele)
         try:
             # Le mode JSON strict force le modèle à respecter le format demandé (supporté par Groq).
             reponse = await asyncio.to_thread(
                 groq_client.chat.completions.create,
                 response_format={"type": "json_object"},
-                **appel_kwargs,
+                **{**appel_kwargs, **options},
             )
         except Exception:
-            # Si le modèle/l'API ne supporte pas ce paramètre, on retente sans.
-            reponse = await asyncio.to_thread(groq_client.chat.completions.create, **appel_kwargs)
+            # Si le modèle/l'API ne supporte pas un de ces paramètres, on retente sans.
+            try:
+                reponse = await asyncio.to_thread(groq_client.chat.completions.create, **{**appel_kwargs, **options})
+            except Exception:
+                reponse = await asyncio.to_thread(groq_client.chat.completions.create, **appel_kwargs)
         return (reponse.choices[0].message.content or "").strip()
 
     try:
@@ -774,6 +803,11 @@ async def _generer_annonce(mots_cles: str, details: Optional[str], ton_key: str,
             contenu = await _appel(avec_photo=False)
         else:
             raise
+
+    if not contenu.strip():
+        # Le modèle a tout consommé en raisonnement interne sans produire de réponse visible :
+        # on retente une fois en texte seul, cette fois ça passe presque toujours.
+        contenu = await _appel(avec_photo=False)
 
     return _parser_reponse_annonce(contenu, mots_cles)
 
