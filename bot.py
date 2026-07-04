@@ -256,7 +256,32 @@ async def on_ready():
         print(f"{len(synced)} commande(s) synchronisée(s) sur le serveur.")
     except Exception as e:
         print(f"Erreur de synchronisation : {e}")
+
+    if not os.environ.get("GROQ_API_KEY"):
+        print("⚠️ ATTENTION : GROQ_API_KEY n'est pas défini, le chat IA et /description ne fonctionneront pas.")
+
+    # Vues persistantes : ré-enregistrées à chaque démarrage pour que les boutons "Lancer une
+    # estimation" / "Générer la description" publiés avant un redémarrage du bot restent cliquables
+    # (sans ça, Discord affiche une erreur sur les anciens boutons après chaque redéploiement Railway).
+    bot.add_view(EstimerIntroView())
+    bot.add_view(AnnonceIntroView())
+
     print(f"Connecté en tant que {bot.user} — bot prêt.")
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Filet de sécurité global : évite le message opaque 'L'application n'a pas répondu' de Discord
+    si une commande plante de façon inattendue, et logge l'erreur côté serveur pour diagnostic."""
+    print(f"[erreur commande] /{interaction.command.name if interaction.command else '?'} : {error!r}")
+    message = "❌ Une erreur inattendue est survenue. Réessaie, et si ça persiste, préviens l'admin du serveur."
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        pass
 
 
 # ============================================================
@@ -270,7 +295,8 @@ async def on_ready():
     lien="Le lien qui sera révélé uniquement au clic (visible seulement par la personne qui clique)"
 )
 async def poster(interaction: discord.Interaction, titre: str, texte: str, lien: str):
-    embed = discord.Embed(title=titre, description=texte, color=discord.Color.blurple())
+    embed = discord.Embed(title=titre[:256], description=texte[:4096], color=discord.Color.blurple())
+    embed.timestamp = discord.utils.utcnow()
     view = LinkButtonView(lien)
     await interaction.response.send_message(embed=embed, view=view)
 
@@ -379,7 +405,17 @@ class GalerieView(discord.ui.View):
         self.items = items
         self.index = 0
         self.embed_principal = embed_principal
+        self.message = None  # assigné après l'envoi, pour pouvoir désactiver les boutons à l'expiration
         self._maj_etat_boutons()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
     def _maj_etat_boutons(self):
         self.precedent.disabled = self.index == 0
@@ -522,6 +558,7 @@ async def _lancer_estimation(
         title="📊 Estimation de prix",
         color=discord.Color.from_rgb(30, 200, 120),
     )
+    embed_principal.timestamp = discord.utils.utcnow()
     embed_principal.add_field(name="🛍️ Article", value=f"**{article}**", inline=False)
     embed_principal.add_field(name="💶 Prix moyen", value=f"{prix_moyen:.2f} €", inline=True)
     embed_principal.add_field(name="↔️ Fourchette", value=f"{prix_min:.2f} € – {prix_max:.2f} €", inline=True)
@@ -559,7 +596,9 @@ async def _lancer_estimation(
 
     if top:
         vue = GalerieView(top, embed_principal)
-        await interaction.followup.send(embeds=[embed_principal, vue._embed_item_courant()], view=vue, ephemeral=True)
+        vue.message = await interaction.followup.send(
+            embeds=[embed_principal, vue._embed_item_courant()], view=vue, ephemeral=True
+        )
     else:
         await interaction.followup.send(embed=embed_principal, ephemeral=True)
 
@@ -631,7 +670,7 @@ class EstimerIntroView(discord.ui.View):
         super().__init__(timeout=None)
         self.photo = photo
 
-    @discord.ui.button(label="Lancer une estimation", style=discord.ButtonStyle.success, emoji="🔍")
+    @discord.ui.button(label="Lancer une estimation", style=discord.ButtonStyle.success, emoji="🔍", custom_id="estimer_lancer_bouton")
     async def lancer(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(EstimerModal(photo=self.photo))
 
@@ -710,9 +749,13 @@ def _construire_instruction_annonce(ton_key: str, channel_id, avec_photo: bool) 
         "Règles d'écriture (important, à respecter systématiquement) :\n"
         "- Majuscule en début de chaque phrase et de chaque ligne de la liste, ponctuation correcte "
         "partout. Un texte qui commence en minuscule ou sans ponctuation a l'air négligé, c'est interdit.\n"
-        "- Chaque ligne de la liste doit contenir un détail concret et réel sur l'article, jamais un "
-        "adjectif vague comme 'de qualité' ou 'confortable' sans élément derrière (préfère une sensation "
-        "ou un usage réel : 'tissu épais qui tient chaud l'hiver' plutôt que 'matière de qualité').\n\n"
+        "- Chaque ligne de la liste doit sonner comme une remarque naturelle qu'un vrai vendeur ferait à "
+        "l'oral, jamais comme une fiche technique. Bannis les mots creux de fiche produit pris seuls : "
+        "'authentique', 'optimal', 'impeccable', 'de qualité' — s'ils apparaissent, ajoute une nuance "
+        "concrète et personnelle à côté ('semelle épaisse, ça encaisse bien sur route' plutôt que "
+        "'semelle avec amorti optimal').\n"
+        "- Jamais un adjectif vague sans élément concret derrière (préfère une sensation ou un usage "
+        "réel : 'tissu épais qui tient chaud l'hiver' plutôt que 'matière de qualité').\n\n"
         "Format de réponse :\n"
         "- Réponds STRICTEMENT avec un objet JSON valide, sans texte autour, sans balises markdown, sans "
         "clé supplémentaire.\n"
@@ -856,6 +899,7 @@ async def _envoyer_annonce(
         return
 
     embed = discord.Embed(title="📋 Annonce générée", color=discord.Color.from_rgb(255, 105, 180))
+    embed.timestamp = discord.utils.utcnow()
     embed.add_field(name="✏️ Titre", value=f"**{titre}**", inline=False)
     embed.add_field(name="📄 Description", value=f"```{description}```", inline=False)
     if photo:
@@ -865,7 +909,7 @@ async def _envoyer_annonce(
     )
 
     vue = AnnonceResultView(mots_cles, details, ton_key, photo)
-    await interaction.followup.send(embed=embed, view=vue, ephemeral=True)
+    vue.message = await interaction.followup.send(embed=embed, view=vue, ephemeral=True)
 
 
 class AnnonceResultView(discord.ui.View):
@@ -877,6 +921,16 @@ class AnnonceResultView(discord.ui.View):
         self.details = details
         self.ton_key = ton_key
         self.photo = photo
+        self.message = None  # assigné après l'envoi, pour pouvoir désactiver le bouton à l'expiration
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
 
     @discord.ui.button(label="Régénérer", style=discord.ButtonStyle.secondary, emoji="🔄")
     async def regenerer(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -915,7 +969,7 @@ class AnnonceIntroView(discord.ui.View):
         self.photo = photo
         self.ton_key = ton_key
 
-    @discord.ui.button(label="Générer la description", style=discord.ButtonStyle.success, emoji="📝")
+    @discord.ui.button(label="Générer la description", style=discord.ButtonStyle.success, emoji="📝", custom_id="annonce_lancer_bouton")
     async def lancer(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(AnnonceModal(photo=self.photo, ton_key=self.ton_key))
 
