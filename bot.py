@@ -15,12 +15,26 @@ from vinted import (
     VintedAuthError,
     VintedError,
 )
+from groq import Groq
 
 # --- Configuration de base ---
 intents = discord.Intents.default()
+intents.message_content = True  # nécessaire pour lire le texte des messages (chat IA)
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 GUILD_ID = os.environ.get("GUILD_ID")
+
+# --- Configuration du chat IA (Groq, gratuit) ---
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+MODELE_CHAT = "llama-3.3-70b-versatile"
+HISTORIQUE_MAX = 10  # nombre de messages gardés en mémoire par salon
+historique_conversations = {}  # {channel_id: [ {"role": ..., "content": ...}, ... ]}
+
+INSTRUCTION_SYSTEME_CHAT = (
+    "Tu es un assistant IA sympathique et utile sur un serveur Discord francophone dédié à "
+    "l'achat/revente d'articles d'occasion. Réponds toujours en français, de façon claire, "
+    "chaleureuse et concise (quelques phrases, sauf si on te demande plus de détails)."
+)
 
 
 # ============================================================
@@ -152,6 +166,64 @@ async def poster(interaction: discord.Interaction, titre: str, texte: str, lien:
     embed = discord.Embed(title=titre, description=texte, color=discord.Color.blurple())
     view = LinkButtonView(lien)
     await interaction.response.send_message(embed=embed, view=view)
+
+
+# ============================================================
+#  Chat IA (mentionne le bot ou réponds à l'un de ses messages)
+# ============================================================
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    await bot.process_commands(message)
+
+    mentionne = bot.user in message.mentions
+    est_une_reponse_au_bot = (
+        message.reference is not None
+        and getattr(message.reference.resolved, "author", None) == bot.user
+    )
+    if not (mentionne or est_une_reponse_au_bot):
+        return
+
+    contenu = message.content
+    for m in message.mentions:
+        contenu = contenu.replace(f"<@{m.id}>", "").replace(f"<@!{m.id}>", "")
+    contenu = contenu.strip() or "Bonjour !"
+
+    async with message.channel.typing():
+        historique = historique_conversations.setdefault(message.channel.id, [])
+        historique.append({"role": "user", "content": contenu})
+        del historique[:-HISTORIQUE_MAX]
+
+        try:
+            messages_api = [{"role": "system", "content": INSTRUCTION_SYSTEME_CHAT}] + historique
+            reponse = await asyncio.to_thread(
+                groq_client.chat.completions.create,
+                model=MODELE_CHAT,
+                max_tokens=600,
+                messages=messages_api,
+            )
+            texte_reponse = reponse.choices[0].message.content or ""
+        except Exception as e:
+            await message.reply(f"❌ Erreur IA : `{e}`")
+            return
+
+        if not texte_reponse:
+            texte_reponse = "(réponse vide, réessaie ta question)"
+
+        historique.append({"role": "assistant", "content": texte_reponse})
+        del historique[:-HISTORIQUE_MAX]
+
+        for i in range(0, len(texte_reponse), 1900):
+            await message.reply(texte_reponse[i:i + 1900])
+
+
+@bot.tree.command(name="reset_chat", description="Efface la mémoire de conversation du chat IA dans ce salon")
+async def reset_chat(interaction: discord.Interaction):
+    historique_conversations.pop(interaction.channel_id, None)
+    await interaction.response.send_message("🧹 Mémoire de conversation effacée pour ce salon.", ephemeral=True)
 
 
 # ============================================================
