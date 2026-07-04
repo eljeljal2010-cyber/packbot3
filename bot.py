@@ -106,9 +106,13 @@ async def on_ready():
             guild = discord.Object(id=int(GUILD_ID))
             bot.tree.copy_global_to(guild=guild)
             synced = await bot.tree.sync(guild=guild)
+            # Supprime les anciennes commandes globales en double (ex: un vieux /estimer
+            # avec photo obligatoire enregistré avant qu'on passe à la synchro par serveur).
+            bot.tree.clear_commands(guild=None)
+            await bot.tree.sync()
         else:
             synced = await bot.tree.sync()
-        print(f"{len(synced)} commande(s) synchronisée(s).")
+        print(f"{len(synced)} commande(s) synchronisée(s) sur le serveur.")
     except Exception as e:
         print(f"Erreur de synchronisation : {e}")
     print(f"Connecté en tant que {bot.user} — bot prêt.")
@@ -128,6 +132,62 @@ async def poster(interaction: discord.Interaction, titre: str, texte: str, lien:
     embed = discord.Embed(title=titre, description=texte, color=discord.Color.blurple())
     view = LinkButtonView(lien)
     await interaction.response.send_message(embed=embed, view=view)
+
+
+class GalerieView(discord.ui.View):
+    """Permet de naviguer entre les annonces comparables avec des flèches, une photo à la fois."""
+
+    MEDAILLES = ["🥇", "🥈", "🥉", "🏅", "🏅"]
+    COULEURS = [
+        discord.Color.gold(),
+        discord.Color.light_grey(),
+        discord.Color.dark_orange(),
+        discord.Color.blurple(),
+        discord.Color.blurple(),
+    ]
+
+    def __init__(self, items, embed_principal):
+        super().__init__(timeout=600)
+        self.items = items
+        self.index = 0
+        self.embed_principal = embed_principal
+        self._maj_etat_boutons()
+
+    def _maj_etat_boutons(self):
+        self.precedent.disabled = self.index == 0
+        self.suivant.disabled = self.index >= len(self.items) - 1
+
+    def _embed_item_courant(self) -> discord.Embed:
+        i = self.items[self.index]
+        titre_annonce = _champ(i, "title") or "Sans titre"
+        url_annonce = _champ(i, "url", "")
+        prix_annonce = _prix_de(i)
+        favs = _favoris_de(i)
+        photo_annonce = _photo_de(i)
+        medaille = self.MEDAILLES[min(self.index, len(self.MEDAILLES) - 1)]
+        couleur = self.COULEURS[min(self.index, len(self.COULEURS) - 1)]
+
+        e = discord.Embed(
+            title=f"{medaille} {titre_annonce[:90]}",
+            url=url_annonce or None,
+            description=f"**{prix_annonce} €**   •   ❤️ {favs} favoris\nAnnonce {self.index + 1}/{len(self.items)}",
+            color=couleur,
+        )
+        if photo_annonce:
+            e.set_image(url=photo_annonce)
+        return e
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def precedent(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index -= 1
+        self._maj_etat_boutons()
+        await interaction.response.edit_message(embeds=[self.embed_principal, self._embed_item_courant()], view=self)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def suivant(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.index += 1
+        self._maj_etat_boutons()
+        await interaction.response.edit_message(embeds=[self.embed_principal, self._embed_item_courant()], view=self)
 
 
 # ============================================================
@@ -204,9 +264,6 @@ async def estimer(
     # Prix conseillé : légèrement sous le médian (nettoyé des valeurs extrêmes) pour vendre plus vite
     prix_conseille = max(round(prix_median * 0.95, 2), prix_min)
 
-    # Les 3 annonces comparables les plus "demandées" (le plus de favoris)
-    top = sorted(items, key=_favoris_de, reverse=True)[:3]
-
     # --- Embed principal (statistiques) ---
     barre = "▰" * min(10, round(demande_moyenne / 5)) + "▱" * (10 - min(10, round(demande_moyenne / 5)))
 
@@ -216,7 +273,6 @@ async def estimer(
     )
     embed_principal.add_field(name="🛍️ Article", value=f"**{article}**", inline=False)
     embed_principal.add_field(name="💶 Prix moyen", value=f"{prix_moyen:.2f} €", inline=True)
-    embed_principal.add_field(name="📍 Prix médian", value=f"{prix_median:.2f} €", inline=True)
     embed_principal.add_field(name="↔️ Fourchette", value=f"{prix_min:.2f} € – {prix_max:.2f} €", inline=True)
     embed_principal.add_field(
         name="❤️ Demande",
@@ -235,37 +291,14 @@ async def estimer(
     if photo:
         embed_principal.set_thumbnail(url=photo.url)
 
-    # --- Un embed par annonce populaire, avec sa photo en grand ---
-    medailles = ["🥇", "🥈", "🥉"]
-    couleurs = [discord.Color.gold(), discord.Color.light_grey(), discord.Color.dark_orange()]
-    embeds = [embed_principal]
+    # --- Jusqu'à 5 annonces comparables les plus "demandées", à parcourir avec les flèches ---
+    top = sorted(items, key=_favoris_de, reverse=True)[:5]
 
     if top:
-        separateur = discord.Embed(
-            description="### 🔥 Annonces comparables les plus demandées",
-            color=discord.Color.from_rgb(88, 101, 242),
-        )
-        embeds.append(separateur)
-
-    for idx, i in enumerate(top):
-        titre_annonce = _champ(i, "title") or "Sans titre"
-        url_annonce = _champ(i, "url", "")
-        prix_annonce = _prix_de(i)
-        favs = _favoris_de(i)
-        photo_annonce = _photo_de(i)
-
-        e = discord.Embed(
-            title=f"{medailles[idx]} {titre_annonce[:90]}",
-            url=url_annonce or None,
-            description=f"**{prix_annonce} €**   •   ❤️ {favs} favoris",
-            color=couleurs[idx],
-        )
-        if photo_annonce:
-            e.set_image(url=photo_annonce)
-        embeds.append(e)
-
-    await interaction.followup.send(embeds=embeds)
-
+        vue = GalerieView(top, embed_principal)
+        await interaction.followup.send(embeds=[embed_principal, vue._embed_item_courant()], view=vue)
+    else:
+        await interaction.followup.send(embed=embed_principal)
 
 if __name__ == "__main__":
     token = os.environ.get("DISCORD_TOKEN")
