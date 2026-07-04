@@ -2,11 +2,19 @@ import os
 import statistics
 import asyncio
 from typing import Optional
+from pathlib import Path
 from urllib.parse import quote
 import discord
 from discord import app_commands
 from discord.ext import commands
-from vinted import VintedClient, VintedRateLimitError, VintedNetworkError, VintedAPIError, VintedError
+from vinted import (
+    VintedClient,
+    VintedRateLimitError,
+    VintedNetworkError,
+    VintedAPIError,
+    VintedAuthError,
+    VintedError,
+)
 
 # --- Configuration de base ---
 intents = discord.Intents.default()
@@ -219,14 +227,31 @@ async def estimer(
         url = f"https://www.vinted.fr/catalog?search_text={quote(requete)}&order=relevance"
 
         async def _rechercher():
-            async with VintedClient() as client:
-                return await client.search_items(url=url, per_page=50, raw_data=True)
+            derniere_erreur = None
+            for tentative in range(3):
+                try:
+                    async with VintedClient(
+                        persist_cookies=True,
+                        cookies_dir=Path("/tmp/vinted_cookies"),
+                    ) as client:
+                        return await client.search_items(url=url, per_page=50, raw_data=True)
+                except (VintedAuthError, VintedRateLimitError) as e:
+                    derniere_erreur = e
+                    if tentative < 2:
+                        await asyncio.sleep(4 * (tentative + 1))
+            raise derniere_erreur
 
-        items = await asyncio.wait_for(_rechercher(), timeout=20)
+        items = await asyncio.wait_for(_rechercher(), timeout=45)
         print(f"[estimer] nb_items={len(items) if items else 0}")
 
     except asyncio.TimeoutError:
         await interaction.followup.send("⏱️ Vinted met trop de temps à répondre. Réessaie dans quelques minutes.")
+        return
+    except VintedAuthError:
+        await interaction.followup.send(
+            "🚫 Vinted a temporairement bloqué la connexion (ça arrive régulièrement avec les hébergeurs gratuits). "
+            "Ce n'est pas systématique — réessaie dans quelques minutes, ça passe souvent au 2e ou 3e essai."
+        )
         return
     except VintedRateLimitError:
         await interaction.followup.send(
