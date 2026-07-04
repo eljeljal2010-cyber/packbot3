@@ -508,7 +508,7 @@ class EstimerModal(discord.ui.Modal, title="🔍 Nouvelle estimation Vinted"):
 
 class EstimerIntroView(discord.ui.View):
     def __init__(self, photo: Optional[discord.Attachment] = None):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
         self.photo = photo
 
     @discord.ui.button(label="Lancer une estimation", style=discord.ButtonStyle.success, emoji="🔍")
