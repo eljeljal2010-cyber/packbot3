@@ -250,35 +250,37 @@ async def _lancer_estimation(
         print(f"[estimer] nb_items={len(items) if items else 0}")
 
     except asyncio.TimeoutError:
-        await interaction.followup.send("⏱️ Vinted met trop de temps à répondre. Réessaie dans quelques minutes.")
+        await interaction.followup.send("⏱️ Vinted met trop de temps à répondre. Réessaie dans quelques minutes.", ephemeral=True)
         return
     except VintedAuthError:
         await interaction.followup.send(
             "🚫 Vinted a temporairement bloqué la connexion (ça arrive régulièrement avec les hébergeurs gratuits). "
-            "Ce n'est pas systématique — réessaie dans quelques minutes, ça passe souvent au 2e ou 3e essai."
+            "Ce n'est pas systématique — réessaie dans quelques minutes, ça passe souvent au 2e ou 3e essai.",
+            ephemeral=True,
         )
         return
     except VintedRateLimitError:
         await interaction.followup.send(
             "🚫 Vinted a temporairement limité les requêtes (trop de recherches d'un coup). "
-            "Réessaie dans quelques minutes."
+            "Réessaie dans quelques minutes.",
+            ephemeral=True,
         )
         return
     except (VintedNetworkError, VintedAPIError, VintedError) as e:
-        await interaction.followup.send(f"❌ Erreur Vinted : `{e}`")
+        await interaction.followup.send(f"❌ Erreur Vinted : `{e}`", ephemeral=True)
         return
     except Exception as e:
-        await interaction.followup.send(f"❌ Erreur inattendue pendant la recherche : `{e}`")
+        await interaction.followup.send(f"❌ Erreur inattendue pendant la recherche : `{e}`", ephemeral=True)
         return
 
     if not items:
-        await interaction.followup.send("Aucune annonce comparable trouvée. Essaie une description plus générale.")
+        await interaction.followup.send("Aucune annonce comparable trouvée. Essaie une description plus générale.", ephemeral=True)
         return
 
     # --- Prix ---
     prix_bruts = [p for p in (_prix_de(i) for i in items) if p is not None]
     if not prix_bruts:
-        await interaction.followup.send("Impossible de récupérer des prix exploitables sur ces annonces.")
+        await interaction.followup.send("Impossible de récupérer des prix exploitables sur ces annonces.", ephemeral=True)
         return
 
     prix_filtres, nb_exclus = _filtrer_valeurs_extremes(prix_bruts)
@@ -353,9 +355,9 @@ async def _lancer_estimation(
 
     if top:
         vue = GalerieView(top, embed_principal)
-        await interaction.followup.send(embeds=[embed_principal, vue._embed_item_courant()], view=vue)
+        await interaction.followup.send(embeds=[embed_principal, vue._embed_item_courant()], view=vue, ephemeral=True)
     else:
-        await interaction.followup.send(embed=embed_principal)
+        await interaction.followup.send(embed=embed_principal, ephemeral=True)
 
 
 # ============================================================
@@ -387,7 +389,7 @@ class EstimerModal(discord.ui.Modal, title="🔍 Nouvelle estimation Vinted"):
         self.photo = photo
 
     async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True)
+        await interaction.response.defer(thinking=True, ephemeral=True)
 
         prix_achat_valeur = None
         if self.prix_achat.value:
@@ -396,7 +398,8 @@ class EstimerModal(discord.ui.Modal, title="🔍 Nouvelle estimation Vinted"):
             except ValueError:
                 await interaction.followup.send(
                     f"⚠️ Le prix d'achat `{self.prix_achat.value}` n'est pas un nombre valide, "
-                    "il a été ignoré pour cette estimation."
+                    "il a été ignoré pour cette estimation.",
+                    ephemeral=True,
                 )
 
         marge_cible_valeur = None
@@ -406,7 +409,8 @@ class EstimerModal(discord.ui.Modal, title="🔍 Nouvelle estimation Vinted"):
             except ValueError:
                 await interaction.followup.send(
                     f"⚠️ La marge `{self.marge_cible.value}` n'est pas un nombre valide, "
-                    "elle a été ignorée (calcul automatique utilisé)."
+                    "elle a été ignorée (calcul automatique utilisé).",
+                    ephemeral=True,
                 )
 
         await _lancer_estimation(
