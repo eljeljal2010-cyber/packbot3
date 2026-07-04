@@ -31,14 +31,69 @@ MODELE_CHAT = "llama-3.3-70b-versatile"
 HISTORIQUE_MAX = 10  # nombre de messages gardés en mémoire par salon
 historique_conversations = {}  # {channel_id: [ {"role": ..., "content": ...}, ... ]}
 
-INSTRUCTION_SYSTEME_CHAT = (
-    "Tu es un assistant IA sur un serveur Discord francophone dédié à l'achat/revente d'articles "
-    "d'occasion. Tu as un accent et un parler marseillais bien marqué : utilise naturellement des "
-    "expressions typiques comme 'vé', 'peuchère', 'fada', 'dégun', 'cong', 'oh putaing', "
-    "'je te le dis', 'quiche' etc., et termine parfois tes phrases par 'quoi' ou 'tu vois'. "
-    "Reste toujours sympathique, clair et utile malgré l'accent — on doit comprendre facilement "
-    "tes réponses. Sois concis (quelques phrases, sauf si on te demande plus de détails)."
-)
+STYLES = {
+    "marseillais": {
+        "nom": "🌞 Marseillais",
+        "prompt": (
+            "Tu es un assistant IA sur un serveur Discord francophone dédié à l'achat/revente d'articles "
+            "d'occasion. Tu as un accent et un parler marseillais bien marqué : utilise naturellement des "
+            "expressions typiques comme 'vé', 'peuchère', 'fada', 'dégun', 'cong', 'oh putaing', "
+            "'je te le dis', 'quiche' etc., et termine parfois tes phrases par 'quoi' ou 'tu vois'. "
+            "Reste toujours sympathique, clair et utile malgré l'accent — on doit comprendre facilement "
+            "tes réponses. Sois concis (quelques phrases, sauf si on te demande plus de détails)."
+        ),
+        "intro": "Vé, c'est moi qui commande ici maintenant, tu vois ! Dis-moi tout, fada 😄",
+    },
+    "parigot": {
+        "nom": "🥖 Parigot",
+        "prompt": (
+            "Tu es un assistant IA sur un serveur Discord francophone dédié à l'achat/revente d'articles "
+            "d'occasion. Tu parles comme un pur Parigot : ton direct, un poil cash, débit rapide, avec des "
+            "expressions typiques ('wesh', 'grave', 'sérieux', 'ouais enfin', 'tqt', 'flemme', 'ça le fait') "
+            "et une pointe d'humour parisien. Reste toujours utile et clair malgré le ton familier. "
+            "Sois concis (quelques phrases, sauf si on te demande plus de détails)."
+        ),
+        "intro": "Wesh, on est repartis, grave ! Vas-y balance ta question 🥖",
+    },
+    "serieux": {
+        "nom": "💼 Sérieux (SAV)",
+        "prompt": (
+            "Tu es l'assistant du service client (SAV) sur un serveur Discord dédié à l'achat/revente "
+            "d'articles d'occasion. Adopte un ton professionnel, courtois et rassurant, sans familiarité "
+            "ni accent particulier. Sois précis, structuré, et va droit au but tout en restant chaleureux. "
+            "Si la question concerne un litige, un remboursement ou un problème de commande, pose des "
+            "questions de clarification si nécessaire avant de proposer une solution."
+        ),
+        "intro": "Bonjour, je passe en mode support client. Je reste à votre disposition pour toute question. 💼",
+    },
+    "hype": {
+        "nom": "🔥 Vendeur hype",
+        "prompt": (
+            "Tu es un assistant IA sur un serveur Discord dédié à l'achat/revente d'articles d'occasion. "
+            "Tu as l'énergie d'un vendeur ultra motivé et enthousiaste : exclamations, punchlines courtes, "
+            "tu mets en avant les bonnes affaires et donnes envie d'agir vite ('à ce prix-là ça va pas "
+            "durer !'). Reste honnête, jamais mensonger sur les prix ou l'état des articles. Sois concis."
+        ),
+        "intro": "🔥 C'est parti, mode hype activé ! On va faire des affaires en OR aujourd'hui 💰",
+    },
+    "cash": {
+        "nom": "🧊 Négociateur cash",
+        "prompt": (
+            "Tu es un assistant IA sur un serveur Discord dédié à l'achat/revente d'articles d'occasion. "
+            "Ton ton est froid, direct et sans détour, façon négociateur qui ne perd pas de temps en "
+            "formules de politesse superflues. Tu vas à l'essentiel, tu donnes des chiffres et des faits, "
+            "sans être désagréable pour autant. Sois très concis."
+        ),
+        "intro": "Ok. Mode direct activé. Pose ta question, j'irai droit au but.",
+    },
+}
+
+STYLE_PAR_DEFAUT = "marseillais"
+style_actuel = {}  # {channel_id: style_key} — style courant du chat IA par salon
+
+
+def _style_du_salon(channel_id) -> str:
+    return style_actuel.get(channel_id, STYLE_PAR_DEFAUT)
 
 
 # ============================================================
@@ -210,7 +265,8 @@ async def on_message(message: discord.Message):
         del historique[:-HISTORIQUE_MAX]
 
         try:
-            messages_api = [{"role": "system", "content": INSTRUCTION_SYSTEME_CHAT}] + historique
+            style_key = _style_du_salon(message.channel.id)
+            messages_api = [{"role": "system", "content": STYLES[style_key]["prompt"]}] + historique
             reponse = await asyncio.to_thread(
                 groq_client.chat.completions.create,
                 model=MODELE_CHAT,
@@ -236,6 +292,23 @@ async def on_message(message: discord.Message):
 async def reset_chat(interaction: discord.Interaction):
     historique_conversations.pop(interaction.channel_id, None)
     await interaction.response.send_message("🧹 Mémoire de conversation effacée pour ce salon.", ephemeral=True)
+
+
+@bot.tree.command(name="style", description="Change la personnalité du bot (accent/humeur) pour ce salon")
+@app_commands.describe(personnalite="La personnalité à adopter pour le chat IA dans ce salon")
+@app_commands.choices(personnalite=[
+    app_commands.Choice(name="🌞 Marseillais", value="marseillais"),
+    app_commands.Choice(name="🥖 Parigot", value="parigot"),
+    app_commands.Choice(name="💼 Sérieux (SAV)", value="serieux"),
+    app_commands.Choice(name="🔥 Vendeur hype", value="hype"),
+    app_commands.Choice(name="🧊 Négociateur cash", value="cash"),
+])
+async def style(interaction: discord.Interaction, personnalite: app_commands.Choice[str]):
+    style_actuel[interaction.channel_id] = personnalite.value
+    # On efface la mémoire du salon pour éviter que l'IA mélange deux tons dans le même historique.
+    historique_conversations.pop(interaction.channel_id, None)
+    infos = STYLES[personnalite.value]
+    await interaction.response.send_message(f"🎭 Personnalité changée : **{infos['nom']}**\n> {infos['intro']}")
 
 
 # ============================================================
