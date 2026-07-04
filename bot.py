@@ -65,6 +65,19 @@ def _favoris_de(obj):
     return _champ(obj, "favourite_count", 0) or 0
 
 
+def _marge_cible_par_defaut(prix_achat: float) -> float:
+    """
+    Marge visée (en %) adaptée au prix d'achat, dans une logique de flip :
+    plus l'article est bon marché, plus on vise un multiplicateur élevé.
+    """
+    if prix_achat <= 15:
+        return 200.0  # viser le triple
+    elif prix_achat <= 40:
+        return 100.0  # viser le double
+    else:
+        return 50.0  # viser +50%
+
+
 def _filtrer_valeurs_extremes(prix_valides):
     """
     Retire les prix aberrants (méthode IQR) qui fausseraient la moyenne,
@@ -114,8 +127,7 @@ async def on_ready():
             guild = discord.Object(id=int(GUILD_ID))
             bot.tree.copy_global_to(guild=guild)
             synced = await bot.tree.sync(guild=guild)
-            # Supprime les anciennes commandes globales en double (ex: un vieux /estimer
-            # avec photo obligatoire enregistré avant qu'on passe à la synchro par serveur).
+            # Supprime les anciennes commandes globales en double.
             bot.tree.clear_commands(guild=None)
             await bot.tree.sync()
         else:
@@ -141,6 +153,10 @@ async def poster(interaction: discord.Interaction, titre: str, texte: str, lien:
     view = LinkButtonView(lien)
     await interaction.response.send_message(embed=embed, view=view)
 
+
+# ============================================================
+#  Galerie photo (flèches) pour les annonces comparables
+# ============================================================
 
 class GalerieView(discord.ui.View):
     """Permet de naviguer entre les annonces comparables avec des flèches, une photo à la fois."""
@@ -199,28 +215,17 @@ class GalerieView(discord.ui.View):
 
 
 # ============================================================
-#  Commande /estimer
+#  Logique commune : lance la recherche et construit le résultat
 # ============================================================
 
-@bot.tree.command(name="estimer", description="Estime le prix de vente d'un article à partir d'annonces Vinted comparables")
-@app_commands.describe(
-    article="Description courte de l'article (ex: pull zara laine col rond)",
-    marque="Marque de l'article (optionnel, améliore la précision)",
-    taille="Taille de l'article (optionnel)",
-    etat="État de l'article (ex: neuf, très bon état, bon état)",
-    photo="Photo de l'article à vendre (optionnel, juste pour l'affichage)"
-)
-async def estimer(
+async def _lancer_estimation(
     interaction: discord.Interaction,
     article: str,
-    marque: Optional[str] = None,
-    taille: Optional[str] = None,
-    etat: Optional[str] = None,
-    photo: Optional[discord.Attachment] = None,
+    prix_achat: Optional[float],
+    marge_cible: Optional[float],
+    photo: Optional[discord.Attachment],
 ):
-    await interaction.response.defer(thinking=True)
-
-    requete = " ".join(filter(None, [marque, article, taille, etat]))
+    requete = article.strip()
     print(f"[estimer] requête envoyée à Vinted : {requete!r}")
 
     try:
@@ -286,8 +291,23 @@ async def estimer(
     favoris = [_favoris_de(i) for i in items]
     demande_moyenne = statistics.mean(favoris) if favoris else 0
 
-    # Prix conseillé : légèrement sous le médian (nettoyé des valeurs extrêmes) pour vendre plus vite
-    prix_conseille = max(round(prix_median * 0.95, 2), prix_min)
+    # Prix conseillé : basé sur le prix médian du marché, avec une marge adaptée
+    # au prix d'achat si fourni (plus élevée pour les articles bon marché).
+    marge_avertissement = None
+    pourcentage_marge = None
+    if prix_achat:
+        pourcentage_marge = marge_cible if marge_cible is not None else _marge_cible_par_defaut(prix_achat)
+        prix_minimum_rentable = round(prix_achat * (1 + pourcentage_marge / 100), 2)
+        prix_conseille = max(prix_median, prix_minimum_rentable)
+        if prix_conseille > prix_max:
+            prix_conseille = prix_max
+            if prix_conseille < prix_minimum_rentable:
+                marge_avertissement = (
+                    f"⚠️ Le marché ne permet pas la marge visée ({pourcentage_marge:.0f}%) sur cet article "
+                    f"(prix max observé : {prix_max:.2f} €)."
+                )
+    else:
+        prix_conseille = max(prix_median, prix_min)
 
     # --- Embed principal (statistiques) ---
     barre = "▰" * min(10, round(demande_moyenne / 5)) + "▱" * (10 - min(10, round(demande_moyenne / 5)))
@@ -305,10 +325,22 @@ async def estimer(
         inline=False,
     )
     embed_principal.add_field(
-        name="💡 Prix conseillé pour vendre rapidement",
+        name="💡 Prix conseillé",
         value=f"## {prix_conseille:.2f} €",
         inline=False,
     )
+    if prix_achat:
+        benefice = round(prix_conseille - prix_achat, 2)
+        embed_principal.add_field(
+            name="📈 Bénéfice estimé",
+            value=(
+                f"{'+' if benefice >= 0 else ''}{benefice:.2f} € "
+                f"(acheté {prix_achat:.2f} € • marge visée {pourcentage_marge:.0f}%)"
+            ),
+            inline=False,
+        )
+    if marge_avertissement:
+        embed_principal.add_field(name="⚠️ Attention", value=marge_avertissement, inline=False)
     sous_texte = f"Basé sur {len(items)} annonces comparables"
     if nb_exclus:
         sous_texte += f" ({nb_exclus} valeur(s) extrême(s) écartée(s) du calcul)"
@@ -324,6 +356,107 @@ async def estimer(
         await interaction.followup.send(embeds=[embed_principal, vue._embed_item_courant()], view=vue)
     else:
         await interaction.followup.send(embed=embed_principal)
+
+
+# ============================================================
+#  Formulaire (modal) déclenché par le bouton
+# ============================================================
+
+class EstimerModal(discord.ui.Modal, title="🔍 Nouvelle estimation Vinted"):
+    article = discord.ui.TextInput(
+        label="Article à estimer",
+        placeholder="ex: Nike Air Force running, taille 42, bon état",
+        required=True,
+        max_length=200,
+    )
+    prix_achat = discord.ui.TextInput(
+        label="Prix d'achat en € (optionnel)",
+        placeholder="ex: 10",
+        required=False,
+        max_length=10,
+    )
+    marge_cible = discord.ui.TextInput(
+        label="Marge visée en % (optionnel)",
+        placeholder="Laisse vide pour un calcul automatique",
+        required=False,
+        max_length=10,
+    )
+
+    def __init__(self, photo: Optional[discord.Attachment] = None):
+        super().__init__()
+        self.photo = photo
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(thinking=True)
+
+        prix_achat_valeur = None
+        if self.prix_achat.value:
+            try:
+                prix_achat_valeur = float(self.prix_achat.value.replace(",", "."))
+            except ValueError:
+                await interaction.followup.send(
+                    f"⚠️ Le prix d'achat `{self.prix_achat.value}` n'est pas un nombre valide, "
+                    "il a été ignoré pour cette estimation."
+                )
+
+        marge_cible_valeur = None
+        if self.marge_cible.value:
+            try:
+                marge_cible_valeur = float(self.marge_cible.value.replace(",", "."))
+            except ValueError:
+                await interaction.followup.send(
+                    f"⚠️ La marge `{self.marge_cible.value}` n'est pas un nombre valide, "
+                    "elle a été ignorée (calcul automatique utilisé)."
+                )
+
+        await _lancer_estimation(
+            interaction,
+            article=self.article.value,
+            prix_achat=prix_achat_valeur,
+            marge_cible=marge_cible_valeur,
+            photo=self.photo,
+        )
+
+
+class EstimerIntroView(discord.ui.View):
+    def __init__(self, photo: Optional[discord.Attachment] = None):
+        super().__init__(timeout=300)
+        self.photo = photo
+
+    @discord.ui.button(label="Lancer une estimation", style=discord.ButtonStyle.success, emoji="🔍")
+    async def lancer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(EstimerModal(photo=self.photo))
+
+
+# ============================================================
+#  Commande /estimer — affiche l'explication + le bouton
+# ============================================================
+
+@bot.tree.command(name="estimer", description="Estime le prix de vente d'un article à partir d'annonces Vinted comparables")
+@app_commands.describe(
+    photo="Photo de l'article à vendre (optionnel, juste pour l'affichage)"
+)
+async def estimer(interaction: discord.Interaction, photo: Optional[discord.Attachment] = None):
+    embed = discord.Embed(
+        title="🔍 Estimateur de prix Vinted",
+        description=(
+            "Ce petit outil t'aide à fixer le meilleur prix de vente pour un article.\n\n"
+            "**Comment ça marche ?**\n"
+            "1️⃣ Clique sur le bouton ci-dessous\n"
+            "2️⃣ Décris l'article (marque, type, taille, état)\n"
+            "3️⃣ Indique ce que tu l'as payé (optionnel, pour viser un bénéfice)\n"
+            "4️⃣ Le bot analyse des dizaines d'annonces similaires sur Vinted et te propose "
+            "le prix le plus adapté, avec les annonces comparables les plus populaires."
+        ),
+        color=discord.Color.from_rgb(88, 101, 242),
+    )
+    if photo:
+        embed.set_thumbnail(url=photo.url)
+    embed.set_footer(text="Données publiques Vinted, à titre indicatif.")
+
+    view = EstimerIntroView(photo=photo)
+    await interaction.response.send_message(embed=embed, view=view)
+
 
 if __name__ == "__main__":
     token = os.environ.get("DISCORD_TOKEN")
