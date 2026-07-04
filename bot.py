@@ -396,11 +396,31 @@ async def on_message(message: discord.Message):
                     "content": f"Résumé des échanges précédents dans ce salon (pour mémoire) : {resume}",
                 })
             messages_api += historique
-            reponse = await _appeler_groq(
-                model=MODELE_CONVERSATION,
-                max_tokens=1200,
-                messages=messages_api,
-            )
+
+            taille_approx = sum(len(m["content"]) for m in messages_api)
+            try:
+                reponse = await _appeler_groq(
+                    model=MODELE_CONVERSATION,
+                    max_tokens=1200,
+                    messages=messages_api,
+                )
+            except Exception as e:
+                # Repli : si la requête est trop grosse (résumé + historique cumulés), on retente
+                # avec un contexte minimal (juste le message actuel) plutôt que d'échouer complètement.
+                if "413" in str(e) or "too_large" in str(e).lower() or "too large" in str(e).lower():
+                    print(f"[chat] requête trop grosse (~{taille_approx} caractères), repli en contexte minimal : {e}")
+                    resume_conversations.pop(message.channel.id, None)
+                    historique_conversations[message.channel.id] = [{"role": "user", "content": contenu}]
+                    reponse = await _appeler_groq(
+                        model=MODELE_CONVERSATION,
+                        max_tokens=1200,
+                        messages=[
+                            {"role": "system", "content": STYLES[style_key]["prompt"]},
+                            {"role": "user", "content": contenu},
+                        ],
+                    )
+                else:
+                    raise
             texte_reponse = reponse.choices[0].message.content or ""
         except Exception as e:
             await message.reply(f"❌ Erreur IA : `{e}`")
