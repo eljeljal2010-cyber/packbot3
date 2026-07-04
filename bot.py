@@ -23,6 +23,7 @@ intents.message_content = True  # nécessaire pour lire le texte des messages (c
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 GUILD_ID = os.environ.get("GUILD_ID")
+CHAT_CHANNEL_ID = os.environ.get("CHAT_CHANNEL_ID")  # si défini, le chat IA ne répond que dans ce salon
 
 # --- Configuration du chat IA (Groq, gratuit) ---
 groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
@@ -169,7 +170,7 @@ async def poster(interaction: discord.Interaction, titre: str, texte: str, lien:
 
 
 # ============================================================
-#  Chat IA (mentionne le bot ou réponds à l'un de ses messages)
+#  Chat IA (répond automatiquement dans le salon dédié)
 # ============================================================
 
 @bot.event
@@ -179,13 +180,21 @@ async def on_message(message: discord.Message):
 
     await bot.process_commands(message)
 
+    dans_salon_dedie = CHAT_CHANNEL_ID and str(message.channel.id) == str(CHAT_CHANNEL_ID)
     mentionne = bot.user in message.mentions
     est_une_reponse_au_bot = (
         message.reference is not None
         and getattr(message.reference.resolved, "author", None) == bot.user
     )
-    if not (mentionne or est_une_reponse_au_bot):
-        return
+
+    # Si un salon dédié est configuré, le bot ne répond QUE là (mention ou non).
+    # Sinon (pas de salon configuré), il répond partout mais seulement si mentionné/répondu.
+    if CHAT_CHANNEL_ID:
+        if not dans_salon_dedie:
+            return
+    else:
+        if not (mentionne or est_une_reponse_au_bot):
+            return
 
     contenu = message.content
     for m in message.mentions:
