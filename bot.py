@@ -360,6 +360,7 @@ async def on_ready():
     bot.add_view(EstimerIntroView())
     bot.add_view(AnnonceIntroView())
     bot.add_view(RechercheIntroView())
+    bot.add_view(VenteIntroView())
 
     if not verifier_alertes.is_running():
         verifier_alertes.start()
@@ -853,112 +854,29 @@ def _barre_texte(valeur, valeur_max, longueur=10):
     return "▰" * rempli + "▱" * (longueur - rempli)
 
 
-@bot.tree.command(name="vente", description="Suivi de tes ventes personnelles : ajouter, liste, supprimer, bilan")
-@app_commands.describe(
-    action="Ce que tu veux faire",
-    article="Ce que tu as vendu (pour 'ajouter')",
-    prix_vente="Prix de vente réel en € (pour 'ajouter')",
-    prix_achat="Ce que tu l'avais payé en € (optionnel, pour 'ajouter' — calcule le bénéfice)",
-    id="Le numéro de la vente à supprimer (visible avec l'action 'liste')",
-)
-@app_commands.choices(action=[
-    app_commands.Choice(name="➕ Ajouter une vente", value="ajouter"),
-    app_commands.Choice(name="🧾 Voir mes dernières ventes", value="liste"),
-    app_commands.Choice(name="🗑️ Supprimer une vente", value="supprimer"),
-    app_commands.Choice(name="📊 Voir mon bilan / tableau de bord", value="bilan"),
-])
-async def vente(
-    interaction: discord.Interaction,
-    action: app_commands.Choice[str],
-    article: Optional[str] = None,
-    prix_vente: Optional[float] = None,
-    prix_achat: Optional[float] = None,
-    id: Optional[int] = None,
-):
-    action_value = action.value
-
-    if action_value == "ajouter":
-        if article is None or prix_vente is None:
-            await interaction.response.send_message(
-                "⚠️ Pour ajouter une vente, renseigne au moins `article` et `prix_vente` "
-                "(ex: `/vente action:Ajouter article:Pull Nike prix_vente:25`).",
-                ephemeral=True,
-            )
-            return
-        nouvelle = {
-            "id": next(_compteur_id_vente),
-            "user_id": interaction.user.id,
-            "article": article.strip()[:200],
-            "prix_vente": prix_vente,
-            "prix_achat": prix_achat,
-            "date": discord.utils.utcnow().isoformat(),
-        }
-        ventes_enregistrees.append(nouvelle)
-        _sauver_ventes()
-
-        texte = f"✅ Vente `#{nouvelle['id']}` enregistrée : **{article}** — {prix_vente:.2f} €"
-        if prix_achat is not None:
-            benefice = round(prix_vente - prix_achat, 2)
-            texte += f" (acheté {prix_achat:.2f} € → {'bénéfice' if benefice >= 0 else 'perte'} de {abs(benefice):.2f} €)"
-        texte += "\nVoir le récap complet avec `/vente action:Bilan`."
-        await interaction.response.send_message(texte, ephemeral=True)
-        return
-
-    if action_value == "liste":
-        mes_ventes = [v for v in ventes_enregistrees if v["user_id"] == interaction.user.id]
-        if not mes_ventes:
-            await interaction.response.send_message(
-                "Aucune vente enregistrée. Utilise `/vente action:Ajouter` pour commencer ton suivi.", ephemeral=True
-            )
-            return
-
-        dernieres = mes_ventes[-15:][::-1]
-        lignes = []
-        for v in dernieres:
-            prix_achat_txt = f" (acheté {v['prix_achat']:.2f} €)" if v.get("prix_achat") is not None else ""
-            lignes.append(f"`#{v['id']}` — {v['article']} — **{v['prix_vente']:.2f} €**{prix_achat_txt}")
-
-        embed = discord.Embed(
-            title="🧾 Tes dernières ventes",
-            description="\n".join(lignes),
-            color=discord.Color.blurple(),
-        )
-        if len(mes_ventes) > 15:
-            embed.set_footer(text=f"15 plus récentes sur {len(mes_ventes)} au total")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-
-    if action_value == "supprimer":
-        if id is None:
-            await interaction.response.send_message(
-                "⚠️ Précise le numéro de la vente à supprimer (visible avec `/vente action:Liste`), "
-                "ex: `/vente action:Supprimer id:3`.",
-                ephemeral=True,
-            )
-            return
-        avant = len(ventes_enregistrees)
-        ventes_enregistrees[:] = [
-            v for v in ventes_enregistrees if not (v["id"] == id and v["user_id"] == interaction.user.id)
-        ]
-        _sauver_ventes()
-
-        if len(ventes_enregistrees) < avant:
-            await interaction.response.send_message(f"🗑️ Vente `#{id}` supprimée.", ephemeral=True)
-        else:
-            await interaction.response.send_message(
-                "Aucune vente trouvée avec ce numéro (elle ne t'appartient peut-être pas).", ephemeral=True
-            )
-        return
-
-    # action_value == "bilan"
+def _embed_liste_ventes(interaction: discord.Interaction) -> Optional[discord.Embed]:
     mes_ventes = [v for v in ventes_enregistrees if v["user_id"] == interaction.user.id]
     if not mes_ventes:
-        await interaction.response.send_message(
-            "Tu n'as encore aucune vente enregistrée. Utilise `/vente action:Ajouter` après chaque vente pour "
-            "construire ton tableau de bord.",
-            ephemeral=True,
-        )
-        return
+        return None
+    dernieres = mes_ventes[-15:][::-1]
+    lignes = []
+    for v in dernieres:
+        prix_achat_txt = f" (acheté {v['prix_achat']:.2f} €)" if v.get("prix_achat") is not None else ""
+        lignes.append(f"`#{v['id']}` — {v['article']} — **{v['prix_vente']:.2f} €**{prix_achat_txt}")
+    embed = discord.Embed(
+        title="🧾 Tes dernières ventes",
+        description="\n".join(lignes),
+        color=discord.Color.blurple(),
+    )
+    if len(mes_ventes) > 15:
+        embed.set_footer(text=f"15 plus récentes sur {len(mes_ventes)} au total")
+    return embed
+
+
+def _embed_bilan_ventes(interaction: discord.Interaction) -> Optional[discord.Embed]:
+    mes_ventes = [v for v in ventes_enregistrees if v["user_id"] == interaction.user.id]
+    if not mes_ventes:
+        return None
 
     nb_ventes = len(mes_ventes)
     chiffre_affaires = sum(v["prix_vente"] for v in mes_ventes)
@@ -1008,7 +926,6 @@ async def vente(
             inline=False,
         )
 
-    # Petit graphique en barres des 5 dernières ventes (par prix de vente)
     cinq_dernieres = mes_ventes[-5:]
     prix_max_recent = max(v["prix_vente"] for v in cinq_dernieres)
     lignes_graphique = [
@@ -1016,9 +933,136 @@ async def vente(
         for v in cinq_dernieres
     ]
     embed.add_field(name="📉 5 dernières ventes", value="\n".join(lignes_graphique), inline=False)
+    embed.set_footer(text="Historique stocké sur le serveur du bot • bouton ➕ pour continuer le suivi")
+    return embed
 
-    embed.set_footer(text="Historique stocké sur le serveur du bot • /vente action:Ajouter pour continuer le suivi")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
+    article = discord.ui.TextInput(label="Article vendu", placeholder="ex: Pull Nike taille M", required=True, max_length=200)
+    prix_vente = discord.ui.TextInput(label="Prix de vente réel en €", placeholder="ex: 25", required=True, max_length=10)
+    prix_achat = discord.ui.TextInput(
+        label="Prix d'achat en € (optionnel)",
+        placeholder="ex: 10 — laisse vide si tu ne sais pas",
+        required=False,
+        max_length=10,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            prix_vente_val = float(self.prix_vente.value.strip().replace(",", "."))
+        except ValueError:
+            await interaction.response.send_message("⚠️ Le prix de vente doit être un nombre (ex: 25 ou 24.90).", ephemeral=True)
+            return
+        prix_achat_val = None
+        if self.prix_achat.value and self.prix_achat.value.strip():
+            try:
+                prix_achat_val = float(self.prix_achat.value.strip().replace(",", "."))
+            except ValueError:
+                await interaction.response.send_message("⚠️ Le prix d'achat doit être un nombre (ex: 10 ou 9.90).", ephemeral=True)
+                return
+
+        nouvelle = {
+            "id": next(_compteur_id_vente),
+            "user_id": interaction.user.id,
+            "article": self.article.value.strip()[:200],
+            "prix_vente": prix_vente_val,
+            "prix_achat": prix_achat_val,
+            "date": discord.utils.utcnow().isoformat(),
+        }
+        ventes_enregistrees.append(nouvelle)
+        _sauver_ventes()
+
+        texte = f"✅ Vente `#{nouvelle['id']}` enregistrée : **{nouvelle['article']}** — {prix_vente_val:.2f} €"
+        if prix_achat_val is not None:
+            benefice = round(prix_vente_val - prix_achat_val, 2)
+            texte += f" (acheté {prix_achat_val:.2f} € → {'bénéfice' if benefice >= 0 else 'perte'} de {abs(benefice):.2f} €)"
+        texte += "\nRelance `/vente` puis 📊 pour voir ton bilan complet."
+        await interaction.response.send_message(texte, ephemeral=True)
+
+
+class VenteSupprimerModal(discord.ui.Modal, title="🗑️ Supprimer une vente"):
+    id_vente = discord.ui.TextInput(
+        label="Numéro de la vente (# visible via 🧾)",
+        placeholder="ex: 3",
+        required=True,
+        max_length=10,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            id_val = int(self.id_vente.value.strip().lstrip("#"))
+        except ValueError:
+            await interaction.response.send_message("⚠️ Le numéro doit être un nombre entier (ex: 3).", ephemeral=True)
+            return
+
+        avant = len(ventes_enregistrees)
+        ventes_enregistrees[:] = [
+            v for v in ventes_enregistrees if not (v["id"] == id_val and v["user_id"] == interaction.user.id)
+        ]
+        _sauver_ventes()
+
+        if len(ventes_enregistrees) < avant:
+            await interaction.response.send_message(f"🗑️ Vente `#{id_val}` supprimée.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "Aucune vente trouvée avec ce numéro (elle ne t'appartient peut-être pas).", ephemeral=True
+            )
+
+
+class VenteIntroView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Ajouter une vente", style=discord.ButtonStyle.success, emoji="➕", custom_id="vente_ajouter_bouton")
+    async def ajouter(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(VenteAjouterModal())
+
+    @discord.ui.button(label="Mes ventes", style=discord.ButtonStyle.secondary, emoji="🧾", custom_id="vente_liste_bouton")
+    async def liste(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = _embed_liste_ventes(interaction)
+        if embed is None:
+            await interaction.response.send_message(
+                "Aucune vente enregistrée. Clique sur ➕ pour commencer ton suivi.", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Supprimer", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="vente_supprimer_bouton")
+    async def supprimer(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(VenteSupprimerModal())
+
+    @discord.ui.button(label="Mon bilan", style=discord.ButtonStyle.primary, emoji="📊", custom_id="vente_bilan_bouton")
+    async def bilan(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = _embed_bilan_ventes(interaction)
+        if embed is None:
+            await interaction.response.send_message(
+                "Tu n'as encore aucune vente enregistrée. Clique sur ➕ après ta prochaine vente pour "
+                "construire ton tableau de bord.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="vente", description="Suivi de tes ventes personnelles : ajouter, liste, supprimer, bilan")
+async def vente(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="💰 Suivi de tes ventes",
+        description=(
+            "Garde une trace de ce que tu vends sur Vinted, et suis ton bénéfice au fil du temps.\n\n"
+            "**Comment ça marche ?**\n"
+            "➕ **Ajouter une vente** — renseigne l'article, le prix de vente, et le prix d'achat si tu "
+            "veux que le bénéfice soit calculé automatiquement\n"
+            "🧾 **Mes ventes** — tes 15 dernières ventes, avec leur numéro (utile pour en supprimer une)\n"
+            "🗑️ **Supprimer** — corrige une erreur de saisie avec le numéro de la vente\n"
+            "📊 **Mon bilan** — chiffre d'affaires, bénéfice cumulé, marge moyenne, meilleures ventes et "
+            "un petit graphique de tes 5 dernières ventes"
+        ),
+        color=discord.Color.from_rgb(255, 215, 0),
+    )
+    embed.set_footer(text="Chaque personne ne voit que ses propres ventes, en privé.")
+    view = VenteIntroView()
+    await interaction.response.send_message(embed=embed, view=view)
 
 
 # ============================================================
