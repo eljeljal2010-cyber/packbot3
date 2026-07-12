@@ -29,7 +29,19 @@ GUILD_ID = os.environ.get("GUILD_ID")
 CHAT_CHANNEL_ID = os.environ.get("CHAT_CHANNEL_ID")  # si défini, le chat IA ne répond que dans ce salon
 
 # --- Configuration du chat IA (Groq, gratuit) ---
-groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+groq_client = None
+if GROQ_API_KEY:
+    try:
+        groq_client = Groq(api_key=GROQ_API_KEY)
+    except Exception as e:
+        print(f"⚠️ Impossible d'initialiser le client Groq : {e}")
+else:
+    print(
+        "⚠️ ATTENTION : GROQ_API_KEY n'est pas défini. Le bot démarre quand même (/poster, /estimer, "
+        "/recherche, les alertes restent fonctionnels), mais le chat IA et /description répondront "
+        "avec un message d'erreur clair tant que la variable n'est pas ajoutée sur Railway."
+    )
 # ⚠️ llama-3.3-70b-versatile est déprécié par Groq (arrêt prévu le 16/08/2026) et
 # llama-4-scout-17b-16e-instruct l'est aussi (arrêt prévu le 17/07/2026) : on utilise
 # directement les remplacements officiels recommandés par Groq, redéfinissables via
@@ -56,11 +68,25 @@ def _options_raisonnement(modele: str) -> dict:
     return {}
 
 
+class GroqNonConfigure(Exception):
+    """Levée quand GROQ_API_KEY n'est pas configurée — message clair plutôt qu'un AttributeError opaque."""
+    pass
+
+
+def _verifier_groq_disponible():
+    if groq_client is None:
+        raise GroqNonConfigure(
+            "La clé GROQ_API_KEY n'est pas configurée sur le serveur (variable d'environnement manquante)."
+        )
+
+
 def _erreur_ia_lisible(e: Exception) -> str:
     """Traduit les erreurs Groq les plus courantes en message compréhensible, plutôt que de balancer
     le JSON brut de l'API à l'utilisateur. Le fameux '413 Request Entity Too Large' de Groq n'est en
     réalité PAS une histoire de message trop long : c'est une limite de débit (tokens/minute) du
     compte — donc pas la peine de le présenter comme une erreur du message envoyé."""
+    if isinstance(e, GroqNonConfigure):
+        return "🔑 Le chat IA n'est pas configuré (clé GROQ_API_KEY manquante) — préviens l'admin du serveur."
     texte = str(e)
     texte_lower = texte.lower()
     if "413" in texte or "request_too_large" in texte_lower:
@@ -78,6 +104,7 @@ def _erreur_ia_lisible(e: Exception) -> str:
 async def _appeler_groq(**kwargs):
     """Appelle Groq en tentant d'abord avec les options de raisonnement réduites, puis se rabat sur
     un appel simple si le modèle/l'API ne supporte pas ces paramètres."""
+    _verifier_groq_disponible()
     modele = kwargs.get("model", "")
     options = _options_raisonnement(modele)
     try:
@@ -325,7 +352,7 @@ async def on_ready():
         print(f"Erreur de synchronisation : {e}")
 
     if not os.environ.get("GROQ_API_KEY"):
-        print("⚠️ ATTENTION : GROQ_API_KEY n'est pas défini, le chat IA et /description ne fonctionneront pas.")
+        print("⚠️ Rappel : GROQ_API_KEY toujours absent, le chat IA et /description restent désactivés.")
 
     # Vues persistantes : ré-enregistrées à chaque démarrage pour que les boutons "Lancer une
     # estimation" / "Générer la description" publiés avant un redémarrage du bot restent cliquables
@@ -1152,6 +1179,7 @@ async def _generer_annonce(mots_cles: str, details: Optional[str], ton_key: str,
         texte_utilisateur += f"\nInfos complémentaires : {details.strip()}"
 
     async def _appel(avec_photo: bool) -> str:
+        _verifier_groq_disponible()
         instruction_systeme = _construire_instruction_annonce(ton_key, channel_id, avec_photo)
         if avec_photo:
             contenu_msg = [
