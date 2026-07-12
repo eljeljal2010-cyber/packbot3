@@ -819,6 +819,209 @@ async def avant_verifier_alertes():
 
 
 # ============================================================
+#  Suivi des ventes & tableau de bord personnel
+# ============================================================
+
+VENTES_FICHIER = Path("/tmp/ventes_utilisateurs.json")
+
+
+def _charger_ventes():
+    if VENTES_FICHIER.exists():
+        try:
+            return json.loads(VENTES_FICHIER.read_text())
+        except Exception as e:
+            print(f"[ventes] échec de lecture du fichier, on repart de zéro : {e}")
+    return []
+
+
+def _sauver_ventes():
+    try:
+        VENTES_FICHIER.write_text(json.dumps(ventes_enregistrees))
+    except Exception as e:
+        print(f"[ventes] échec de sauvegarde : {e}")
+
+
+ventes_enregistrees = _charger_ventes()
+_compteur_id_vente = itertools.count(max([v["id"] for v in ventes_enregistrees], default=0) + 1)
+
+
+def _barre_texte(valeur, valeur_max, longueur=10):
+    if valeur_max <= 0:
+        rempli = 0
+    else:
+        rempli = min(longueur, round((valeur / valeur_max) * longueur))
+    return "▰" * rempli + "▱" * (longueur - rempli)
+
+
+@bot.tree.command(name="vente", description="Suivi de tes ventes personnelles : ajouter, liste, supprimer, bilan")
+@app_commands.describe(
+    action="Ce que tu veux faire",
+    article="Ce que tu as vendu (pour 'ajouter')",
+    prix_vente="Prix de vente réel en € (pour 'ajouter')",
+    prix_achat="Ce que tu l'avais payé en € (optionnel, pour 'ajouter' — calcule le bénéfice)",
+    id="Le numéro de la vente à supprimer (visible avec l'action 'liste')",
+)
+@app_commands.choices(action=[
+    app_commands.Choice(name="➕ Ajouter une vente", value="ajouter"),
+    app_commands.Choice(name="🧾 Voir mes dernières ventes", value="liste"),
+    app_commands.Choice(name="🗑️ Supprimer une vente", value="supprimer"),
+    app_commands.Choice(name="📊 Voir mon bilan / tableau de bord", value="bilan"),
+])
+async def vente(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str],
+    article: Optional[str] = None,
+    prix_vente: Optional[float] = None,
+    prix_achat: Optional[float] = None,
+    id: Optional[int] = None,
+):
+    action_value = action.value
+
+    if action_value == "ajouter":
+        if article is None or prix_vente is None:
+            await interaction.response.send_message(
+                "⚠️ Pour ajouter une vente, renseigne au moins `article` et `prix_vente` "
+                "(ex: `/vente action:Ajouter article:Pull Nike prix_vente:25`).",
+                ephemeral=True,
+            )
+            return
+        nouvelle = {
+            "id": next(_compteur_id_vente),
+            "user_id": interaction.user.id,
+            "article": article.strip()[:200],
+            "prix_vente": prix_vente,
+            "prix_achat": prix_achat,
+            "date": discord.utils.utcnow().isoformat(),
+        }
+        ventes_enregistrees.append(nouvelle)
+        _sauver_ventes()
+
+        texte = f"✅ Vente `#{nouvelle['id']}` enregistrée : **{article}** — {prix_vente:.2f} €"
+        if prix_achat is not None:
+            benefice = round(prix_vente - prix_achat, 2)
+            texte += f" (acheté {prix_achat:.2f} € → {'bénéfice' if benefice >= 0 else 'perte'} de {abs(benefice):.2f} €)"
+        texte += "\nVoir le récap complet avec `/vente action:Bilan`."
+        await interaction.response.send_message(texte, ephemeral=True)
+        return
+
+    if action_value == "liste":
+        mes_ventes = [v for v in ventes_enregistrees if v["user_id"] == interaction.user.id]
+        if not mes_ventes:
+            await interaction.response.send_message(
+                "Aucune vente enregistrée. Utilise `/vente action:Ajouter` pour commencer ton suivi.", ephemeral=True
+            )
+            return
+
+        dernieres = mes_ventes[-15:][::-1]
+        lignes = []
+        for v in dernieres:
+            prix_achat_txt = f" (acheté {v['prix_achat']:.2f} €)" if v.get("prix_achat") is not None else ""
+            lignes.append(f"`#{v['id']}` — {v['article']} — **{v['prix_vente']:.2f} €**{prix_achat_txt}")
+
+        embed = discord.Embed(
+            title="🧾 Tes dernières ventes",
+            description="\n".join(lignes),
+            color=discord.Color.blurple(),
+        )
+        if len(mes_ventes) > 15:
+            embed.set_footer(text=f"15 plus récentes sur {len(mes_ventes)} au total")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    if action_value == "supprimer":
+        if id is None:
+            await interaction.response.send_message(
+                "⚠️ Précise le numéro de la vente à supprimer (visible avec `/vente action:Liste`), "
+                "ex: `/vente action:Supprimer id:3`.",
+                ephemeral=True,
+            )
+            return
+        avant = len(ventes_enregistrees)
+        ventes_enregistrees[:] = [
+            v for v in ventes_enregistrees if not (v["id"] == id and v["user_id"] == interaction.user.id)
+        ]
+        _sauver_ventes()
+
+        if len(ventes_enregistrees) < avant:
+            await interaction.response.send_message(f"🗑️ Vente `#{id}` supprimée.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "Aucune vente trouvée avec ce numéro (elle ne t'appartient peut-être pas).", ephemeral=True
+            )
+        return
+
+    # action_value == "bilan"
+    mes_ventes = [v for v in ventes_enregistrees if v["user_id"] == interaction.user.id]
+    if not mes_ventes:
+        await interaction.response.send_message(
+            "Tu n'as encore aucune vente enregistrée. Utilise `/vente action:Ajouter` après chaque vente pour "
+            "construire ton tableau de bord.",
+            ephemeral=True,
+        )
+        return
+
+    nb_ventes = len(mes_ventes)
+    chiffre_affaires = sum(v["prix_vente"] for v in mes_ventes)
+    ventes_avec_achat = [v for v in mes_ventes if v.get("prix_achat") is not None]
+    benefice_total = sum(v["prix_vente"] - v["prix_achat"] for v in ventes_avec_achat)
+    marge_moyenne = (
+        statistics.mean(
+            ((v["prix_vente"] - v["prix_achat"]) / v["prix_achat"] * 100)
+            for v in ventes_avec_achat if v["prix_achat"] > 0
+        )
+        if ventes_avec_achat else None
+    )
+
+    meilleure_vente = max(mes_ventes, key=lambda v: v["prix_vente"])
+    if ventes_avec_achat:
+        meilleur_benefice = max(ventes_avec_achat, key=lambda v: v["prix_vente"] - v["prix_achat"])
+    else:
+        meilleur_benefice = None
+
+    embed = discord.Embed(
+        title=f"📊 Tableau de bord de {interaction.user.display_name}",
+        color=discord.Color.from_rgb(255, 215, 0),
+    )
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    embed.add_field(name="🧾 Ventes totales", value=str(nb_ventes), inline=True)
+    embed.add_field(name="💶 Chiffre d'affaires", value=f"{chiffre_affaires:.2f} €", inline=True)
+    if ventes_avec_achat:
+        embed.add_field(name="📈 Bénéfice cumulé", value=f"{benefice_total:+.2f} €", inline=True)
+        embed.add_field(name="📐 Marge moyenne", value=f"{marge_moyenne:.0f} %", inline=True)
+    else:
+        embed.add_field(
+            name="📈 Bénéfice cumulé",
+            value="Renseigne le prix d'achat sur tes prochaines ventes pour l'activer.",
+            inline=False,
+        )
+
+    embed.add_field(
+        name="🏆 Meilleure vente (prix)",
+        value=f"{meilleure_vente['article']} — **{meilleure_vente['prix_vente']:.2f} €**",
+        inline=False,
+    )
+    if meilleur_benefice:
+        gain = meilleur_benefice["prix_vente"] - meilleur_benefice["prix_achat"]
+        embed.add_field(
+            name="💎 Meilleure vente (bénéfice)",
+            value=f"{meilleur_benefice['article']} — **+{gain:.2f} €**",
+            inline=False,
+        )
+
+    # Petit graphique en barres des 5 dernières ventes (par prix de vente)
+    cinq_dernieres = mes_ventes[-5:]
+    prix_max_recent = max(v["prix_vente"] for v in cinq_dernieres)
+    lignes_graphique = [
+        f"{_barre_texte(v['prix_vente'], prix_max_recent)}  {v['prix_vente']:.0f}€ — {v['article'][:25]}"
+        for v in cinq_dernieres
+    ]
+    embed.add_field(name="📉 5 dernières ventes", value="\n".join(lignes_graphique), inline=False)
+
+    embed.set_footer(text="Historique stocké sur le serveur du bot • /vente action:Ajouter pour continuer le suivi")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+# ============================================================
 #  Logique commune : lance la recherche et construit le résultat
 # ============================================================
 
