@@ -928,7 +928,7 @@ def _embed_bilan_ventes(interaction: discord.Interaction) -> Optional[discord.Em
     ventes_avec_delai = [v for v in mes_ventes if v.get("jours_en_ligne") is not None]
     if ventes_avec_delai:
         delai_moyen = statistics.mean(v["jours_en_ligne"] for v in ventes_avec_delai)
-        embed.add_field(name="⏱️ Temps de vente moyen", value=f"{delai_moyen:.1f} jour(s) en ligne avant la vente", inline=True)
+        embed.add_field(name="⏱️ Temps de vente moyen", value=f"{_formater_duree(delai_moyen)} en ligne avant la vente", inline=True)
 
     embed.add_field(
         name="🏆 Meilleure vente (prix)",
@@ -954,6 +954,34 @@ def _embed_bilan_ventes(interaction: discord.Interaction) -> Optional[discord.Em
     return embed
 
 
+def _parser_duree_en_jours(texte: str) -> Optional[float]:
+    """Parse une durée écrite en français de façon flexible (ex: '5', '5j', '5 jours', '2 semaines',
+    '3 mois', '10h') et retourne l'équivalent en jours (float), ou None si le texte est vide/invalide."""
+    if not texte or not texte.strip():
+        return None
+    t = texte.strip().lower().replace(",", ".")
+    match = re.match(r"^(\d+(?:\.\d+)?)\s*([a-zéè.]*)$", t)
+    if not match:
+        return None
+    valeur = float(match.group(1))
+    unite = match.group(2).rstrip(".")
+    if unite in ("h", "heure", "heures"):
+        return valeur / 24
+    if unite in ("sem", "semaine", "semaines"):
+        return valeur * 7
+    if unite in ("mois", "m"):
+        return valeur * 30
+    return valeur  # vide, 'j', 'jour', 'jours', ou toute autre unité non reconnue → traité comme des jours
+
+
+def _formater_duree(jours: float) -> str:
+    if jours < 1:
+        return f"{round(jours * 24)} heure(s)"
+    if jours == int(jours):
+        return f"{int(jours)} jour(s)"
+    return f"{jours:.1f} jour(s)"
+
+
 class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
     article = discord.ui.TextInput(label="Article vendu", placeholder="ex: Pull Nike taille M", required=True, max_length=200)
     prix_annonce = discord.ui.TextInput(
@@ -969,11 +997,11 @@ class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
         required=False,
         max_length=10,
     )
-    jours_en_ligne = discord.ui.TextInput(
-        label="Jours en ligne avant la vente (optionnel)",
-        placeholder="ex: 5 — laisse vide si tu ne sais pas",
+    temps_en_ligne = discord.ui.TextInput(
+        label="Temps en ligne avant la vente (optionnel)",
+        placeholder="ex: 5j, 2 semaines, 10h — laisse vide si tu ne sais pas",
         required=False,
-        max_length=5,
+        max_length=20,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -1000,13 +1028,12 @@ class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
                 return
 
         jours_en_ligne_val = None
-        if self.jours_en_ligne.value and self.jours_en_ligne.value.strip():
-            try:
-                jours_en_ligne_val = int(self.jours_en_ligne.value.strip())
-                if jours_en_ligne_val < 0:
-                    raise ValueError
-            except ValueError:
-                await interaction.response.send_message("⚠️ Le nombre de jours doit être un entier positif (ex: 5).", ephemeral=True)
+        if self.temps_en_ligne.value and self.temps_en_ligne.value.strip():
+            jours_en_ligne_val = _parser_duree_en_jours(self.temps_en_ligne.value)
+            if jours_en_ligne_val is None or jours_en_ligne_val < 0:
+                await interaction.response.send_message(
+                    "⚠️ Durée non reconnue (ex: 5, 5j, 2 semaines, 10h).", ephemeral=True
+                )
                 return
 
         date_vente = discord.utils.utcnow()
@@ -1035,7 +1062,7 @@ class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
             benefice = round(prix_vente_val - prix_achat_val, 2)
             texte += f" (achetée {prix_achat_val:.2f} € → {'bénéfice' if benefice >= 0 else 'perte'} de {abs(benefice):.2f} €)"
         if jours_en_ligne_val is not None:
-            texte += f"\n🕐 En ligne {jours_en_ligne_val} jour(s) avant la vente."
+            texte += f"\n🕐 En ligne {_formater_duree(jours_en_ligne_val)} avant la vente."
         texte += "\nRelance `/vente` puis 📊 pour voir ton bilan complet."
         await interaction.response.send_message(texte, ephemeral=True)
 
