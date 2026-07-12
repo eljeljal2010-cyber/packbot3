@@ -655,6 +655,32 @@ async def _rechercher_vinted(requete: str, per_page: int = 50):
     return await asyncio.wait_for(_rechercher(), timeout=45)
 
 
+_CACHE_RECHERCHE = {}  # {(requete_normalisee, per_page): (timestamp, items)}
+CACHE_RECHERCHE_TTL = 180  # secondes — assez court pour rester frais, assez long pour éviter les doublons
+
+
+async def _rechercher_vinted_cache(requete: str, per_page: int = 50):
+    """Comme _rechercher_vinted, mais réutilise un résultat récent (< 3 min) pour la même requête au
+    lieu de retaper Vinted : évite les appels redondants quand plusieurs personnes cherchent la même
+    chose à peu de temps d'intervalle (recherche, estimation, alertes confondues)."""
+    cle = (requete.strip().lower(), per_page)
+    maintenant = asyncio.get_event_loop().time()
+    entree = _CACHE_RECHERCHE.get(cle)
+    if entree and (maintenant - entree[0]) < CACHE_RECHERCHE_TTL:
+        return entree[1]
+
+    items = await _rechercher_vinted(requete, per_page=per_page)
+    _CACHE_RECHERCHE[cle] = (maintenant, items)
+
+    # Purge légère du cache pour ne pas grossir indéfiniment (déclenchée seulement si ça devient gros).
+    if len(_CACHE_RECHERCHE) > 200:
+        expiration = maintenant - CACHE_RECHERCHE_TTL
+        for c in [c for c, (t, _) in _CACHE_RECHERCHE.items() if t < expiration]:
+            _CACHE_RECHERCHE.pop(c, None)
+
+    return items
+
+
 # ============================================================
 #  Alertes de bonnes affaires Vinted (vérifiées en arrière-plan)
 # ============================================================
@@ -674,9 +700,9 @@ def _charger_alertes():
     return []
 
 
-def _sauver_alertes():
+async def _sauver_alertes():
     try:
-        ALERTES_FICHIER.write_text(json.dumps(alertes_actives))
+        await asyncio.to_thread(ALERTES_FICHIER.write_text, json.dumps(alertes_actives))
     except Exception as e:
         print(f"[alertes] échec de sauvegarde : {e}")
 
@@ -685,7 +711,7 @@ alertes_actives = _charger_alertes()
 _compteur_id_alerte = itertools.count(max([a["id"] for a in alertes_actives], default=0) + 1)
 
 
-def _creer_alerte(user_id: int, article: str, prix_max: Optional[float]):
+async def _creer_alerte(user_id: int, article: str, prix_max: Optional[float]):
     """Crée une alerte de prix pour un utilisateur. Retourne (ok, message) — ok=False si le quota
     d'alertes actives est atteint."""
     mes_alertes = [a for a in alertes_actives if a["user_id"] == user_id]
@@ -703,7 +729,7 @@ def _creer_alerte(user_id: int, article: str, prix_max: Optional[float]):
         "vus": [],
     }
     alertes_actives.append(nouvelle)
-    _sauver_alertes()
+    await _sauver_alertes()
 
     texte_prix = f" à moins de {prix_max:.2f} €" if prix_max else ""
     return True, (
@@ -720,7 +746,7 @@ def _creer_alerte(user_id: int, article: str, prix_max: Optional[float]):
     prix_max="Prix maximum en € (optionnel, sinon toute annonce correspondante déclenche l'alerte)",
 )
 async def alerte_ajouter(interaction: discord.Interaction, article: str, prix_max: Optional[float] = None):
-    ok, message = _creer_alerte(interaction.user.id, article, prix_max)
+    ok, message = await _creer_alerte(interaction.user.id, article, prix_max)
     await interaction.response.send_message(message, ephemeral=True)
 
 
@@ -752,7 +778,7 @@ async def alerte_supprimer(interaction: discord.Interaction, id: int):
     global alertes_actives
     avant = len(alertes_actives)
     alertes_actives[:] = [a for a in alertes_actives if not (a["id"] == id and a["user_id"] == interaction.user.id)]
-    _sauver_alertes()
+    await _sauver_alertes()
 
     if len(alertes_actives) < avant:
         await interaction.response.send_message(f"🗑️ Alerte `#{id}` supprimée.", ephemeral=True)
@@ -767,52 +793,62 @@ async def verifier_alertes():
     if not alertes_actives:
         return
 
+    # Regroupe les alertes par requête identique (insensible à la casse/espaces) : si 5 personnes
+    # suivent "nike air force 42", on ne fait qu'UN SEUL appel Vinted pour les 5, au lieu de 5 appels
+    # séquentiels — plus rapide, et beaucoup plus doux avec Vinted (moins de risque de blocage).
+    groupes = {}
     for alerte in list(alertes_actives):
+        cle = alerte["article"].strip().lower()
+        groupes.setdefault(cle, []).append(alerte)
+
+    for cle, alertes_du_groupe in groupes.items():
+        requete = alertes_du_groupe[0]["article"]
         try:
-            items = await _rechercher_vinted(alerte["article"], per_page=20)
+            items = await _rechercher_vinted_cache(requete, per_page=20)
         except Exception as e:
-            print(f"[alertes] échec recherche pour l'alerte #{alerte['id']} : {e}")
+            print(f"[alertes] échec recherche pour '{requete}' ({len(alertes_du_groupe)} alerte(s) concernée(s)) : {e}")
             await asyncio.sleep(5)
             continue
 
-        nouveaux = []
-        for item in items or []:
-            item_id = str(_champ(item, "id", _champ(item, "url", "")))
-            if not item_id or item_id in alerte["vus"]:
-                continue
-            prix = _prix_de(item)
-            if alerte.get("prix_max") and (prix is None or prix > alerte["prix_max"]):
-                continue
-            nouveaux.append(item)
-            alerte["vus"].append(item_id)
+        for alerte in alertes_du_groupe:
+            nouveaux = []
+            for item in items or []:
+                item_id = str(_champ(item, "id", _champ(item, "url", "")))
+                if not item_id or item_id in alerte["vus"]:
+                    continue
+                prix = _prix_de(item)
+                if alerte.get("prix_max") and (prix is None or prix > alerte["prix_max"]):
+                    continue
+                nouveaux.append(item)
+                alerte["vus"].append(item_id)
 
-        alerte["vus"] = alerte["vus"][-ALERTES_VUS_MAX:]
+            alerte["vus"] = alerte["vus"][-ALERTES_VUS_MAX:]
 
-        if nouveaux:
-            try:
-                utilisateur = await bot.fetch_user(alerte["user_id"])
-                for item in nouveaux[:3]:  # au plus 3 notifs par vérification, pour ne pas spammer
-                    titre = _champ(item, "title") or "Sans titre"
-                    prix = _prix_de(item)
-                    url_item = _champ(item, "url", "")
-                    photo_item = _photo_de(item)
-                    embed = discord.Embed(
-                        title=f"🔔 Bonne affaire trouvée : {titre[:100]}",
-                        url=url_item or None,
-                        description=f"**{prix} €**\nCorrespond à ton alerte : *{alerte['article']}*",
-                        color=discord.Color.gold(),
-                    )
-                    if photo_item:
-                        embed.set_image(url=photo_item)
-                    await utilisateur.send(embed=embed)
-            except discord.Forbidden:
-                print(f"[alertes] MPs fermés pour l'utilisateur {alerte['user_id']}, notification impossible.")
-            except Exception as e:
-                print(f"[alertes] échec d'envoi de notification : {e}")
+            if nouveaux:
+                try:
+                    utilisateur = await bot.fetch_user(alerte["user_id"])
+                    for item in nouveaux[:3]:  # au plus 3 notifs par vérification, pour ne pas spammer
+                        titre = _champ(item, "title") or "Sans titre"
+                        prix = _prix_de(item)
+                        url_item = _champ(item, "url", "")
+                        photo_item = _photo_de(item)
+                        embed = discord.Embed(
+                            title=f"🔔 Bonne affaire trouvée : {titre[:100]}",
+                            url=url_item or None,
+                            description=f"**{prix} €**\nCorrespond à ton alerte : *{alerte['article']}*",
+                            color=discord.Color.gold(),
+                        )
+                        if photo_item:
+                            embed.set_image(url=photo_item)
+                        await utilisateur.send(embed=embed)
+                except discord.Forbidden:
+                    print(f"[alertes] MPs fermés pour l'utilisateur {alerte['user_id']}, notification impossible.")
+                except Exception as e:
+                    print(f"[alertes] échec d'envoi de notification : {e}")
 
-        await asyncio.sleep(3)  # petite pause entre chaque alerte, pour ménager Vinted
+        await asyncio.sleep(3)  # petite pause entre chaque requête UNIQUE, pour ménager Vinted
 
-    _sauver_alertes()
+    await _sauver_alertes()
 
 
 @verifier_alertes.before_loop
@@ -836,9 +872,9 @@ def _charger_ventes():
     return []
 
 
-def _sauver_ventes():
+async def _sauver_ventes():
     try:
-        VENTES_FICHIER.write_text(json.dumps(ventes_enregistrees))
+        await asyncio.to_thread(VENTES_FICHIER.write_text, json.dumps(ventes_enregistrees))
     except Exception as e:
         print(f"[ventes] échec de sauvegarde : {e}")
 
@@ -1051,7 +1087,7 @@ class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
             "date_mise_en_ligne": date_mise_en_ligne.isoformat() if date_mise_en_ligne else None,
         }
         ventes_enregistrees.append(nouvelle)
-        _sauver_ventes()
+        await _sauver_ventes()
 
         if prix_annonce_val is not None and prix_annonce_val != prix_vente_val:
             texte_prix = f"annoncée à {prix_annonce_val:.2f} € → vendue **{prix_vente_val:.2f} €**"
@@ -1086,7 +1122,7 @@ class VenteSupprimerModal(discord.ui.Modal, title="🗑️ Supprimer une vente")
         ventes_enregistrees[:] = [
             v for v in ventes_enregistrees if not (v["id"] == id_val and v["user_id"] == interaction.user.id)
         ]
-        _sauver_ventes()
+        await _sauver_ventes()
 
         if len(ventes_enregistrees) < avant:
             await interaction.response.send_message(f"🗑️ Vente `#{id_val}` supprimée.", ephemeral=True)
@@ -1167,7 +1203,7 @@ async def _lancer_estimation(
     print(f"[estimer] requête envoyée à Vinted : {requete!r}")
 
     try:
-        items = await _rechercher_vinted(requete)
+        items = await _rechercher_vinted_cache(requete, per_page=50)
         print(f"[estimer] nb_items={len(items) if items else 0}")
 
     except asyncio.TimeoutError:
@@ -1729,7 +1765,7 @@ class RechercheGalerieView(GalerieView):
 
     @discord.ui.button(label="Créer une alerte pour cette recherche", style=discord.ButtonStyle.primary, emoji="🔔", row=1)
     async def creer_alerte(self, interaction: discord.Interaction, button: discord.ui.Button):
-        ok, message = _creer_alerte(interaction.user.id, self.requete, self.prix_max)
+        ok, message = await _creer_alerte(interaction.user.id, self.requete, self.prix_max)
         await interaction.response.send_message(message, ephemeral=True)
 
 
@@ -1747,7 +1783,7 @@ async def _lancer_recherche(interaction: discord.Interaction, requete_texte: str
             prix_max = None
 
     try:
-        items = await _rechercher_vinted(requete, per_page=50)
+        items = await _rechercher_vinted_cache(requete, per_page=50)
     except asyncio.TimeoutError:
         await interaction.followup.send("⏱️ Vinted met trop de temps à répondre. Réessaie dans quelques minutes.", ephemeral=True)
         return
