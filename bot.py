@@ -4,6 +4,7 @@ import re
 import statistics
 import asyncio
 import itertools
+from datetime import timedelta, timezone, datetime
 from typing import Optional
 from pathlib import Path
 from urllib.parse import quote
@@ -861,8 +862,13 @@ def _embed_liste_ventes(interaction: discord.Interaction) -> Optional[discord.Em
     dernieres = mes_ventes[-15:][::-1]
     lignes = []
     for v in dernieres:
-        prix_achat_txt = f" (acheté {v['prix_achat']:.2f} €)" if v.get("prix_achat") is not None else ""
-        lignes.append(f"`#{v['id']}` — {v['article']} — **{v['prix_vente']:.2f} €**{prix_achat_txt}")
+        prix_achat_txt = f" (achetée {v['prix_achat']:.2f} €)" if v.get("prix_achat") is not None else ""
+        prix_annonce = v.get("prix_annonce")
+        if prix_annonce is not None and prix_annonce != v["prix_vente"]:
+            texte_prix = f"annoncée {prix_annonce:.2f} € → **{v['prix_vente']:.2f} €**"
+        else:
+            texte_prix = f"**{v['prix_vente']:.2f} €**"
+        lignes.append(f"`#{v['id']}` — {v['article']} — {texte_prix}{prix_achat_txt}")
     embed = discord.Embed(
         title="🧾 Tes dernières ventes",
         description="\n".join(lignes),
@@ -901,6 +907,12 @@ def _embed_bilan_ventes(interaction: discord.Interaction) -> Optional[discord.Em
         color=discord.Color.from_rgb(255, 215, 0),
     )
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
+
+    premiere_date = min(datetime.fromisoformat(v["date"]) for v in mes_ventes)
+    jours_actif = (discord.utils.utcnow() - premiere_date).days
+    texte_depuis = f"Le {premiere_date.strftime('%d/%m/%Y')}" + (f" ({jours_actif} jour(s))" if jours_actif > 0 else " (aujourd'hui)")
+    embed.add_field(name="🗓️ Vendeur depuis", value=texte_depuis, inline=False)
+
     embed.add_field(name="🧾 Ventes totales", value=str(nb_ventes), inline=True)
     embed.add_field(name="💶 Chiffre d'affaires", value=f"{chiffre_affaires:.2f} €", inline=True)
     if ventes_avec_achat:
@@ -912,6 +924,11 @@ def _embed_bilan_ventes(interaction: discord.Interaction) -> Optional[discord.Em
             value="Renseigne le prix d'achat sur tes prochaines ventes pour l'activer.",
             inline=False,
         )
+
+    ventes_avec_delai = [v for v in mes_ventes if v.get("jours_en_ligne") is not None]
+    if ventes_avec_delai:
+        delai_moyen = statistics.mean(v["jours_en_ligne"] for v in ventes_avec_delai)
+        embed.add_field(name="⏱️ Temps de vente moyen", value=f"{delai_moyen:.1f} jour(s) en ligne avant la vente", inline=True)
 
     embed.add_field(
         name="🏆 Meilleure vente (prix)",
@@ -939,12 +956,24 @@ def _embed_bilan_ventes(interaction: discord.Interaction) -> Optional[discord.Em
 
 class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
     article = discord.ui.TextInput(label="Article vendu", placeholder="ex: Pull Nike taille M", required=True, max_length=200)
-    prix_vente = discord.ui.TextInput(label="Prix de vente réel en €", placeholder="ex: 25", required=True, max_length=10)
+    prix_annonce = discord.ui.TextInput(
+        label="Prix affiché sur l'annonce en € (optionnel)",
+        placeholder="ex: 30 — laisse vide si identique au prix vendu",
+        required=False,
+        max_length=10,
+    )
+    prix_vente = discord.ui.TextInput(label="Prix auquel elle a été vendue en €", placeholder="ex: 25", required=True, max_length=10)
     prix_achat = discord.ui.TextInput(
-        label="Prix d'achat en € (optionnel)",
+        label="Prix que tu l'avais payé en € (optionnel)",
         placeholder="ex: 10 — laisse vide si tu ne sais pas",
         required=False,
         max_length=10,
+    )
+    jours_en_ligne = discord.ui.TextInput(
+        label="Jours en ligne avant la vente (optionnel)",
+        placeholder="ex: 5 — laisse vide si tu ne sais pas",
+        required=False,
+        max_length=5,
     )
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -953,6 +982,7 @@ class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
         except ValueError:
             await interaction.response.send_message("⚠️ Le prix de vente doit être un nombre (ex: 25 ou 24.90).", ephemeral=True)
             return
+
         prix_achat_val = None
         if self.prix_achat.value and self.prix_achat.value.strip():
             try:
@@ -961,21 +991,51 @@ class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
                 await interaction.response.send_message("⚠️ Le prix d'achat doit être un nombre (ex: 10 ou 9.90).", ephemeral=True)
                 return
 
+        prix_annonce_val = None
+        if self.prix_annonce.value and self.prix_annonce.value.strip():
+            try:
+                prix_annonce_val = float(self.prix_annonce.value.strip().replace(",", "."))
+            except ValueError:
+                await interaction.response.send_message("⚠️ Le prix de l'annonce doit être un nombre (ex: 30 ou 29.90).", ephemeral=True)
+                return
+
+        jours_en_ligne_val = None
+        if self.jours_en_ligne.value and self.jours_en_ligne.value.strip():
+            try:
+                jours_en_ligne_val = int(self.jours_en_ligne.value.strip())
+                if jours_en_ligne_val < 0:
+                    raise ValueError
+            except ValueError:
+                await interaction.response.send_message("⚠️ Le nombre de jours doit être un entier positif (ex: 5).", ephemeral=True)
+                return
+
+        date_vente = discord.utils.utcnow()
+        date_mise_en_ligne = (date_vente - timedelta(days=jours_en_ligne_val)) if jours_en_ligne_val is not None else None
+
         nouvelle = {
             "id": next(_compteur_id_vente),
             "user_id": interaction.user.id,
             "article": self.article.value.strip()[:200],
+            "prix_annonce": prix_annonce_val,
             "prix_vente": prix_vente_val,
             "prix_achat": prix_achat_val,
-            "date": discord.utils.utcnow().isoformat(),
+            "jours_en_ligne": jours_en_ligne_val,
+            "date": date_vente.isoformat(),
+            "date_mise_en_ligne": date_mise_en_ligne.isoformat() if date_mise_en_ligne else None,
         }
         ventes_enregistrees.append(nouvelle)
         _sauver_ventes()
 
-        texte = f"✅ Vente `#{nouvelle['id']}` enregistrée : **{nouvelle['article']}** — {prix_vente_val:.2f} €"
+        if prix_annonce_val is not None and prix_annonce_val != prix_vente_val:
+            texte_prix = f"annoncée à {prix_annonce_val:.2f} € → vendue **{prix_vente_val:.2f} €**"
+        else:
+            texte_prix = f"vendue **{prix_vente_val:.2f} €**"
+        texte = f"✅ Vente `#{nouvelle['id']}` enregistrée : **{nouvelle['article']}** — {texte_prix}"
         if prix_achat_val is not None:
             benefice = round(prix_vente_val - prix_achat_val, 2)
-            texte += f" (acheté {prix_achat_val:.2f} € → {'bénéfice' if benefice >= 0 else 'perte'} de {abs(benefice):.2f} €)"
+            texte += f" (achetée {prix_achat_val:.2f} € → {'bénéfice' if benefice >= 0 else 'perte'} de {abs(benefice):.2f} €)"
+        if jours_en_ligne_val is not None:
+            texte += f"\n🕐 En ligne {jours_en_ligne_val} jour(s) avant la vente."
         texte += "\nRelance `/vente` puis 📊 pour voir ton bilan complet."
         await interaction.response.send_message(texte, ephemeral=True)
 
@@ -1051,12 +1111,12 @@ async def vente(interaction: discord.Interaction):
         description=(
             "Garde une trace de ce que tu vends sur Vinted, et suis ton bénéfice au fil du temps.\n\n"
             "**Comment ça marche ?**\n"
-            "➕ **Ajouter une vente** — renseigne l'article, le prix de vente, et le prix d'achat si tu "
-            "veux que le bénéfice soit calculé automatiquement\n"
+            "➕ **Ajouter une vente** — renseigne l'article, le prix vendu, et en option le prix affiché "
+            "sur l'annonce (si différent), le prix d'achat, et le nombre de jours en ligne avant la vente\n"
             "🧾 **Mes ventes** — tes 15 dernières ventes, avec leur numéro (utile pour en supprimer une)\n"
             "🗑️ **Supprimer** — corrige une erreur de saisie avec le numéro de la vente\n"
-            "📊 **Mon bilan** — chiffre d'affaires, bénéfice cumulé, marge moyenne, meilleures ventes et "
-            "un petit graphique de tes 5 dernières ventes"
+            "📊 **Mon bilan** — depuis quand tu vends, chiffre d'affaires, bénéfice cumulé, marge moyenne, "
+            "temps de vente moyen, meilleures ventes et un petit graphique de tes 5 dernières ventes"
         ),
         color=discord.Color.from_rgb(255, 215, 0),
     )
