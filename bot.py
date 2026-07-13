@@ -2074,7 +2074,7 @@ class EstimerIntroView(discord.ui.View):
 
 @bot.tree.command(name="estimer", description="Estime le prix de vente d'un article à partir d'annonces Vinted comparables")
 @app_commands.describe(
-    photo="Photo de l'article (optionnel) — analysée par l'IA pour affiner la recherche et estimer plus précisément"
+    photo="Photo de l'article (optionnel) — aide l'IA à affiner la recherche et l'estimation"
 )
 async def estimer(interaction: discord.Interaction, photo: Optional[discord.Attachment] = None):
     embed = discord.Embed(
@@ -2517,10 +2517,10 @@ async def _synthese_ia_niches(resultats: list) -> Optional[str]:
 
 @bot.tree.command(
     name="niche",
-    description="Détecte les niches Vinted à forte demande et faible concurrence (à partir de mots-clés ou d'une liste par défaut)",
+    description="Détecte les niches Vinted à forte demande et faible concurrence",
 )
 @app_commands.describe(
-    mots_cles="Mots-clés/catégories à comparer, séparés par des virgules (optionnel — sinon une liste de catégories courantes est utilisée)"
+    mots_cles="Mots-clés séparés par des virgules (optionnel, sinon liste de catégories par défaut)"
 )
 async def niche(interaction: discord.Interaction, mots_cles: Optional[str] = None):
     await interaction.response.defer(thinking=True)
