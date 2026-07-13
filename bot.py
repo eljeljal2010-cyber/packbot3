@@ -1743,11 +1743,24 @@ async def _analyser_photo_pour_estimation(article: str, photo: discord.Attachmen
         ],
     )
     options = _options_raisonnement(MODELE_VISION)
+    # Timeout explicite : sans ça, un appel lent (ou une erreur suivie du fallback ci-dessous) peut
+    # faire traîner toute l'estimation pendant plus d'une minute. Ici on plafonne à 20s par tentative,
+    # et si ça échoue on continue simplement sans l'analyse photo plutôt que de faire attendre.
+    DELAI_MAX_ANALYSE_PHOTO = 20
     try:
-        reponse = await asyncio.to_thread(groq_client.chat.completions.create, **{**appel_kwargs, **options})
+        reponse = await asyncio.wait_for(
+            asyncio.to_thread(groq_client.chat.completions.create, **{**appel_kwargs, **options}),
+            timeout=DELAI_MAX_ANALYSE_PHOTO,
+        )
+    except asyncio.TimeoutError:
+        print(f"[estimer] analyse photo : délai de {DELAI_MAX_ANALYSE_PHOTO}s dépassé, poursuite sans analyse photo")
+        return None
     except Exception:
         try:
-            reponse = await asyncio.to_thread(groq_client.chat.completions.create, **appel_kwargs)
+            reponse = await asyncio.wait_for(
+                asyncio.to_thread(groq_client.chat.completions.create, **appel_kwargs),
+                timeout=DELAI_MAX_ANALYSE_PHOTO,
+            )
         except Exception as e:
             print(f"[estimer] analyse photo échouée : {e}")
             return None
@@ -1978,7 +1991,7 @@ class EstimationResultView(GalerieView):
             return
 
         photo = message_photo.attachments[0]
-        await interaction.followup.send("📸 Photo reçue, nouvelle estimation en cours...", ephemeral=True)
+        await interaction.followup.send("📸 Photo reçue, nouvelle estimation en cours (ça peut prendre jusqu'à une minute)...", ephemeral=True)
         await _lancer_estimation(
             interaction,
             article=self.article,
