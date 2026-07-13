@@ -1639,11 +1639,15 @@ def _estimer_temps_vente(ventes_similaires: list, demande_moyenne: float, nb_ann
         return texte, moyenne, True
 
     # Pas d'historique perso exploitable : estimation grossière, clairement indiquée comme telle,
-    # car Vinted ne communique pas la durée de vie réelle des annonces vendues.
-    if demande_moyenne >= 5 and nb_annonces <= 30:
+    # car Vinted ne communique pas la durée de vie réelle des annonces vendues. La demande (favoris
+    # moyens) est le facteur principal ; le nombre d'annonces comparables (plafonné à 50 par la
+    # recherche) ne sert qu'à nuancer, pas à bloquer un bon résultat quand la demande est déjà forte.
+    if demande_moyenne >= 8:
         fourchette = "quelques jours"
+    elif demande_moyenne >= 4:
+        fourchette = "quelques jours" if nb_annonces <= 40 else "1 à 2 semaines"
     elif demande_moyenne >= 1.5:
-        fourchette = "1 à 2 semaines"
+        fourchette = "1 à 2 semaines" if nb_annonces <= 40 else "2 à 3 semaines"
     else:
         fourchette = "plusieurs semaines"
     texte = f"Estimation grossière (pas de donnée Vinted précise) : {fourchette}."
@@ -1922,12 +1926,67 @@ async def _lancer_estimation(
     top = sorted(items, key=_favoris_de, reverse=True)[:5]
 
     if top:
-        vue = GalerieView(top, embed_principal)
+        vue = EstimationResultView(
+            top, embed_principal, article, prix_achat, prix_vise, temps_vise_texte,
+            deja_une_photo=photo is not None,
+        )
         vue.message = await interaction.followup.send(
             embeds=[embed_principal, vue._embed_item_courant()], view=vue, ephemeral=True
         )
     else:
         await interaction.followup.send(embed=embed_principal, ephemeral=True)
+
+
+class EstimationResultView(GalerieView):
+    """Étend la galerie de résultats d'une estimation avec un bouton pour joindre une photo après
+    coup (Discord ne permet pas les pièces jointes dans les formulaires eux-mêmes), afin de relancer
+    une estimation affinée sans devoir retaper toute la commande."""
+
+    def __init__(self, items, embed_principal, article, prix_achat, prix_vise, temps_vise_texte, deja_une_photo: bool):
+        super().__init__(items, embed_principal)
+        self.article = article
+        self.prix_achat = prix_achat
+        self.prix_vise = prix_vise
+        self.temps_vise_texte = temps_vise_texte
+        if not deja_une_photo:
+            bouton = discord.ui.Button(
+                label="Ajouter une photo pour affiner",
+                style=discord.ButtonStyle.primary,
+                emoji="📷",
+                row=1,
+            )
+            bouton.callback = self._demander_photo
+            self.add_item(bouton)
+
+    async def _demander_photo(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "📷 Envoie ta photo ici, dans ce salon, dans les 60 secondes — je relance l'estimation avec.",
+            ephemeral=True,
+        )
+
+        def verifie(m: discord.Message):
+            return (
+                m.author.id == interaction.user.id
+                and m.channel.id == interaction.channel_id
+                and bool(m.attachments)
+            )
+
+        try:
+            message_photo = await bot.wait_for("message", timeout=60.0, check=verifie)
+        except asyncio.TimeoutError:
+            await interaction.followup.send("⏱️ Pas de photo reçue à temps, tant pis pour cette fois.", ephemeral=True)
+            return
+
+        photo = message_photo.attachments[0]
+        await interaction.followup.send("📸 Photo reçue, nouvelle estimation en cours...", ephemeral=True)
+        await _lancer_estimation(
+            interaction,
+            article=self.article,
+            prix_achat=self.prix_achat,
+            prix_vise=self.prix_vise,
+            temps_vise_texte=self.temps_vise_texte,
+            photo=photo,
+        )
 
 
 # ============================================================
