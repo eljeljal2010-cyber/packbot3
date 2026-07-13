@@ -1710,7 +1710,8 @@ async def _lancer_estimation(
     interaction: discord.Interaction,
     article: str,
     prix_achat: Optional[float],
-    marge_cible: Optional[float],
+    prix_vise: Optional[float],
+    temps_vise_texte: Optional[str],
     photo: Optional[discord.Attachment],
 ):
     requete = article.strip()
@@ -1764,19 +1765,31 @@ async def _lancer_estimation(
     favoris = [_favoris_de(i) for i in items]
     demande_moyenne = statistics.mean(favoris) if favoris else 0
 
-    # Prix conseillé : basé sur le prix médian du marché, avec une marge adaptée
-    # au prix d'achat si fourni (plus élevée pour les articles bon marché).
+    # Prix conseillé : si un prix visé est donné, on l'utilise directement et on le compare au
+    # marché ; sinon, prix conseillé automatique basé sur le prix médian du marché.
     marge_avertissement = None
-    pourcentage_marge = None
-    if prix_achat:
-        pourcentage_marge = marge_cible if marge_cible is not None else _marge_cible_par_defaut(prix_achat)
+    position_marche = None
+    if prix_vise is not None:
+        prix_conseille = prix_vise
+        if prix_vise > prix_max:
+            position_marche = f"⚠️ Plus cher que toutes les annonces comparables (max observé : {prix_max:.2f} €) — risque de rester en ligne longtemps."
+        elif prix_vise > prix_median:
+            position_marche = f"➖ Au-dessus du prix médian du marché ({prix_median:.2f} €) — vendable, mais moins rapidement."
+        elif prix_vise < prix_min:
+            position_marche = f"✅ En dessous de toutes les annonces comparables (min observé : {prix_min:.2f} €) — devrait partir vite."
+        else:
+            position_marche = f"✅ Dans la fourchette du marché (médiane : {prix_median:.2f} €)."
+        if prix_achat and prix_vise <= prix_achat:
+            marge_avertissement = f"⚠️ À ce prix, tu ne couvres même pas ton prix d'achat ({prix_achat:.2f} €)."
+    elif prix_achat:
+        pourcentage_marge = _marge_cible_par_defaut(prix_achat)
         prix_minimum_rentable = round(prix_achat * (1 + pourcentage_marge / 100), 2)
         prix_conseille = max(prix_median, prix_minimum_rentable)
         if prix_conseille > prix_max:
             prix_conseille = prix_max
             if prix_conseille < prix_minimum_rentable:
                 marge_avertissement = (
-                    f"⚠️ Le marché ne permet pas la marge visée ({pourcentage_marge:.0f}%) sur cet article "
+                    f"⚠️ Le marché ne permet pas une marge confortable sur cet article "
                     f"(prix max observé : {prix_max:.2f} €)."
                 )
     else:
@@ -1799,18 +1812,17 @@ async def _lancer_estimation(
         inline=False,
     )
     embed_principal.add_field(
-        name="💡 Prix conseillé",
+        name="💡 Prix visé" if prix_vise is not None else "💡 Prix conseillé",
         value=f"## {prix_conseille:.2f} €",
         inline=False,
     )
+    if position_marche:
+        embed_principal.add_field(name="📍 Position par rapport au marché", value=position_marche, inline=False)
     if prix_achat:
         benefice = round(prix_conseille - prix_achat, 2)
         embed_principal.add_field(
             name="📈 Bénéfice estimé",
-            value=(
-                f"{'+' if benefice >= 0 else ''}{benefice:.2f} € "
-                f"(acheté {prix_achat:.2f} € • marge visée {pourcentage_marge:.0f}%)"
-            ),
+            value=f"{'+' if benefice >= 0 else ''}{benefice:.2f} € (acheté {prix_achat:.2f} €)",
             inline=False,
         )
     if marge_avertissement:
@@ -1821,6 +1833,16 @@ async def _lancer_estimation(
     ventes_similaires = _ventes_similaires(interaction.user.id, article)
     texte_temps, jours_moyens, est_reel = _estimer_temps_vente(ventes_similaires, demande_moyenne, len(items))
     verdict, raisons = _evaluer_opportunite(len(items), demande_moyenne, marge_pct_reelle, jours_moyens)
+
+    jours_vises = _parser_duree_en_jours(temps_vise_texte) if temps_vise_texte else None
+    if jours_vises is not None:
+        jours_reference = jours_moyens if jours_moyens is not None else 10  # repère grossier si pas d'historique
+        if jours_vises >= jours_reference * 1.3:
+            raisons.append(f"😌 Ton objectif ({_formater_duree(jours_vises)}) est large par rapport à l'estimation — bonne marge de sécurité.")
+        elif jours_vises >= jours_reference * 0.7:
+            raisons.append(f"👍 Ton objectif ({_formater_duree(jours_vises)}) semble réaliste au vu de la demande/concurrence.")
+        else:
+            raisons.append(f"⚠️ Ton objectif ({_formater_duree(jours_vises)}) est ambitieux — baisse le prix ou soigne l'annonce pour tenir ce délai.")
 
     embed_principal.add_field(name="🧭 Ça vaut le coup ?", value=f"**{verdict}**\n" + "\n".join(raisons), inline=False)
     embed_principal.add_field(
@@ -1865,11 +1887,17 @@ class EstimerModal(discord.ui.Modal, title="🔍 Nouvelle estimation Vinted"):
         required=False,
         max_length=10,
     )
-    marge_cible = discord.ui.TextInput(
-        label="Marge visée en % (optionnel)",
-        placeholder="Laisse vide pour un calcul automatique",
+    prix_vise = discord.ui.TextInput(
+        label="Prix auquel tu veux le vendre en € (optionnel)",
+        placeholder="Laisse vide pour un prix conseillé automatique",
         required=False,
         max_length=10,
+    )
+    temps_vise = discord.ui.TextInput(
+        label="En combien de temps veux-tu le vendre ? (optionnel)",
+        placeholder="ex: 5j, 1 semaine — laisse vide si tu ne sais pas",
+        required=False,
+        max_length=20,
     )
 
     def __init__(self, photo: Optional[discord.Attachment] = None):
@@ -1890,14 +1918,14 @@ class EstimerModal(discord.ui.Modal, title="🔍 Nouvelle estimation Vinted"):
                     ephemeral=True,
                 )
 
-        marge_cible_valeur = None
-        if self.marge_cible.value:
+        prix_vise_valeur = None
+        if self.prix_vise.value:
             try:
-                marge_cible_valeur = float(self.marge_cible.value.replace(",", "."))
+                prix_vise_valeur = float(self.prix_vise.value.replace(",", "."))
             except ValueError:
                 await interaction.followup.send(
-                    f"⚠️ La marge `{self.marge_cible.value}` n'est pas un nombre valide, "
-                    "elle a été ignorée (calcul automatique utilisé).",
+                    f"⚠️ Le prix visé `{self.prix_vise.value}` n'est pas un nombre valide, "
+                    "il a été ignoré (prix conseillé automatique utilisé).",
                     ephemeral=True,
                 )
 
@@ -1905,7 +1933,8 @@ class EstimerModal(discord.ui.Modal, title="🔍 Nouvelle estimation Vinted"):
             interaction,
             article=self.article.value,
             prix_achat=prix_achat_valeur,
-            marge_cible=marge_cible_valeur,
+            prix_vise=prix_vise_valeur,
+            temps_vise_texte=self.temps_vise.value.strip() if self.temps_vise.value else None,
             photo=self.photo,
         )
 
@@ -1936,11 +1965,11 @@ async def estimer(interaction: discord.Interaction, photo: Optional[discord.Atta
             "**Comment ça marche ?**\n"
             "1️⃣ Clique sur le bouton ci-dessous\n"
             "2️⃣ Décris l'article (marque, type, taille, état)\n"
-            "3️⃣ Indique ce que tu l'as payé (optionnel, pour viser un bénéfice)\n"
-            "4️⃣ Le bot analyse des dizaines d'annonces similaires sur Vinted et te propose "
-            "le prix le plus adapté, un verdict 🧭 (ça vaut le coup ou pas) basé sur la demande, la "
-            "concurrence et ta marge, et un temps de vente estimé (basé sur tes ventes similaires si "
-            "tu en as déjà enregistré via `/suivi`)."
+            "3️⃣ Indique ce que tu l'as payé, le prix auquel tu veux le vendre, et/ou le délai visé "
+            "(tout optionnel — laisse vide pour un prix conseillé automatique)\n"
+            "4️⃣ Le bot analyse des dizaines d'annonces similaires sur Vinted et te donne un verdict 🧭 "
+            "(ça vaut le coup ou pas) basé sur la demande, la concurrence et ta marge, et un temps de "
+            "vente estimé (basé sur tes ventes similaires si tu en as déjà enregistré via `/suivi`)."
         ),
         color=discord.Color.from_rgb(88, 101, 242),
     )
