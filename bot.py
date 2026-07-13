@@ -1112,7 +1112,31 @@ class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
         embed = discord.Embed(title=f"✅ Vente #{nouvelle['id']} enregistrée", description=description, color=discord.Color.green())
         if self.photo:
             embed.set_thumbnail(url=self.photo.url)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # Pas de photo jointe à la commande /vente elle-même (les modals Discord ne peuvent pas en
+        # contenir) : on propose d'en envoyer une juste après, pour l'associer à cette vente précise —
+        # pratique pour enchaîner plusieurs ventes avec une photo différente à chaque fois.
+        embed.set_footer(text="📷 Envoie une photo ici dans les 90 secondes pour l'associer à cette vente (facultatif).")
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        def _verif_photo(m: discord.Message) -> bool:
+            return (
+                m.author.id == interaction.user.id
+                and m.channel.id == interaction.channel.id
+                and bool(_images_jointes(m))
+            )
+
+        try:
+            message_photo = await bot.wait_for("message", check=_verif_photo, timeout=90)
+        except asyncio.TimeoutError:
+            return
+
+        photo_recue = _images_jointes(message_photo)[0]
+        nouvelle["photo_url"] = photo_recue.url
+        await _sauver_ventes()
+        await interaction.followup.send(f"📷 Photo associée à la vente `#{nouvelle['id']}` !", ephemeral=True)
 
 
 class VenteSupprimerModal(discord.ui.Modal, title="🗑️ Supprimer une vente"):
@@ -1190,8 +1214,9 @@ async def vente(interaction: discord.Interaction, photo: Optional[discord.Attach
             "**Comment ça marche ?**\n"
             "➕ **Ajouter une vente** — renseigne l'article, le prix vendu, et en option le prix affiché "
             "sur l'annonce (si différent), le prix d'achat, et le temps en ligne avant la vente (tu peux "
-            "écrire ce que tu veux : '5j', '2 semaines', '10h'...). Joins une photo à cette commande "
-            "`/vente` pour qu'elle soit gardée avec la vente.\n"
+            "écrire ce que tu veux : '5j', '2 semaines', '10h'...). Une fois le formulaire envoyé, tu "
+            "peux directement poster une photo dans le salon pour l'associer à cette vente — pratique "
+            "pour enchaîner plusieurs ventes d'affilée, chacune avec sa propre photo.\n"
             "🧾 **Mes ventes** — tes 15 dernières ventes, avec leur numéro (utile pour en supprimer une)\n"
             "🗑️ **Supprimer** — corrige une erreur de saisie avec le numéro de la vente\n"
             "📊 **Mon bilan** — depuis quand tu vends, chiffre d'affaires, bénéfice cumulé, marge moyenne, "
