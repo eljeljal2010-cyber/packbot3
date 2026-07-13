@@ -645,7 +645,7 @@ async def _rechercher_vinted(requete: str, per_page: int = 50):
                     cookies_dir=Path("/tmp/vinted_cookies"),
                 ) as client:
                     return await client.search_items(url=url, per_page=per_page, raw_data=True)
-            except (VintedAuthError, VintedRateLimitError) as e:
+            except (VintedAuthError, VintedRateLimitError, VintedNetworkError, VintedAPIError) as e:
                 derniere_erreur = e
                 if tentative < 2:
                     await asyncio.sleep(4 * (tentative + 1))
@@ -1972,20 +1972,23 @@ class EstimationResultView(GalerieView):
             self.add_item(bouton)
 
     async def _demander_photo(self, interaction: discord.Interaction):
+        DELAI_ATTENTE_PHOTO = 120  # 60s s'est révélé souvent trop juste (temps de choisir/uploader la photo)
         await interaction.response.send_message(
-            "📷 Envoie ta photo ici, dans ce salon, dans les 60 secondes — je relance l'estimation avec.",
+            f"📷 Envoie ta photo ici, dans ce salon, dans les {DELAI_ATTENTE_PHOTO} secondes — je relance l'estimation avec.",
             ephemeral=True,
         )
 
         def verifie(m: discord.Message):
-            return (
-                m.author.id == interaction.user.id
-                and m.channel.id == interaction.channel_id
-                and bool(m.attachments)
-            )
+            bon_auteur_et_salon = m.author.id == interaction.user.id and m.channel.id == interaction.channel_id
+            if bon_auteur_et_salon and not m.attachments:
+                # Log de diagnostic : si ce message apparaît sans qu'une photo n'ait jamais été
+                # détectée, ça veut dire que le message est bien vu mais sans pièce jointe attachée
+                # (utile pour distinguer un vrai souci d'intents d'un simple souci de timing).
+                print(f"[estimer] message reçu du bon auteur/salon mais sans pièce jointe : {m.content!r}")
+            return bon_auteur_et_salon and bool(m.attachments)
 
         try:
-            message_photo = await bot.wait_for("message", timeout=60.0, check=verifie)
+            message_photo = await bot.wait_for("message", timeout=DELAI_ATTENTE_PHOTO, check=verifie)
         except asyncio.TimeoutError:
             await interaction.followup.send("⏱️ Pas de photo reçue à temps, tant pis pour cette fois.", ephemeral=True)
             return
