@@ -1611,6 +1611,101 @@ async def suivi(interaction: discord.Interaction, photo: Optional[discord.Attach
 #  Logique commune : lance la recherche et construit le résultat
 # ============================================================
 
+def _ventes_similaires(user_id: int, article: str, limite: int = 20) -> list:
+    """Cherche dans l'historique /vente de l'utilisateur des ventes dont l'article a au moins un mot
+    significatif en commun avec la requête, et pour lesquelles un temps en ligne a été renseigné —
+    la seule source de données FIABLE sur le temps de vente réel (Vinted ne le fournit pas)."""
+    mots_cles = {m for m in re.findall(r"\w+", article.lower()) if len(m) > 2}
+    if not mots_cles:
+        return []
+    resultats = []
+    for v in ventes_enregistrees:
+        if v["user_id"] != user_id or v.get("jours_en_ligne") is None:
+            continue
+        mots_article = {m for m in re.findall(r"\w+", v["article"].lower()) if len(m) > 2}
+        if mots_cles & mots_article:
+            resultats.append(v)
+    return resultats[-limite:]
+
+
+def _estimer_temps_vente(ventes_similaires: list, demande_moyenne: float, nb_annonces: int):
+    """Retourne (texte affichable, jours_moyens ou None, est_base_sur_historique_reel)."""
+    if ventes_similaires:
+        jours = [v["jours_en_ligne"] for v in ventes_similaires]
+        moyenne = statistics.mean(jours)
+        texte = (
+            f"D'après tes {len(ventes_similaires)} vente(s) similaire(s) : "
+            f"environ **{_formater_duree(moyenne)}** avant de vendre en moyenne."
+        )
+        return texte, moyenne, True
+
+    # Pas d'historique perso exploitable : estimation grossière, clairement indiquée comme telle,
+    # car Vinted ne communique pas la durée de vie réelle des annonces vendues.
+    if demande_moyenne >= 5 and nb_annonces <= 30:
+        fourchette = "quelques jours"
+    elif demande_moyenne >= 1.5:
+        fourchette = "1 à 2 semaines"
+    else:
+        fourchette = "plusieurs semaines"
+    texte = f"Estimation grossière (pas de donnée Vinted précise) : {fourchette}."
+    return texte, None, False
+
+
+def _evaluer_opportunite(nb_annonces: int, demande_moyenne: float, marge_pct: Optional[float], jours_vente_reels: Optional[float]):
+    """Calcule un verdict simple (🟢/🟡/🔴) à partir des signaux disponibles. C'est une aide à la
+    décision basée sur des heuristiques (données Vinted publiques + historique perso si dispo),
+    pas une martingale — le marché reste imprévisible."""
+    points = 0
+    raisons = []
+
+    if demande_moyenne >= 5:
+        points += 2
+        raisons.append("✅ Bonne demande (beaucoup de favoris sur les annonces comparables)")
+    elif demande_moyenne >= 1.5:
+        points += 1
+        raisons.append("➖ Demande correcte, sans plus")
+    else:
+        points -= 1
+        raisons.append("⚠️ Peu de favoris sur les annonces comparables : demande incertaine")
+
+    if nb_annonces <= 15:
+        points += 1
+        raisons.append("✅ Peu de concurrence directe")
+    elif nb_annonces <= 50:
+        raisons.append("➖ Concurrence modérée")
+    else:
+        points -= 1
+        raisons.append("⚠️ Beaucoup d'annonces similaires : il faudra se démarquer (photos, description)")
+
+    if marge_pct is not None:
+        if marge_pct >= 50:
+            points += 2
+            raisons.append(f"✅ Belle marge potentielle (~{marge_pct:.0f}%)")
+        elif marge_pct >= 15:
+            points += 1
+            raisons.append(f"➖ Marge correcte (~{marge_pct:.0f}%)")
+        else:
+            points -= 2
+            raisons.append(f"⚠️ Marge faible ou négative (~{marge_pct:.0f}%)")
+
+    if jours_vente_reels is not None:
+        if jours_vente_reels <= 7:
+            points += 1
+            raisons.append(f"✅ Tes ventes similaires partent vite (~{_formater_duree(jours_vente_reels)} en moyenne)")
+        elif jours_vente_reels >= 30:
+            points -= 1
+            raisons.append(f"⚠️ Tes ventes similaires prennent du temps (~{_formater_duree(jours_vente_reels)} en moyenne)")
+
+    if points >= 3:
+        verdict = "🟢 Ça vaut clairement le coup"
+    elif points >= 0:
+        verdict = "🟡 Correct, mais reste vigilant"
+    else:
+        verdict = "🔴 Risqué à ce prix"
+
+    return verdict, raisons
+
+
 async def _lancer_estimation(
     interaction: discord.Interaction,
     article: str,
@@ -1720,6 +1815,20 @@ async def _lancer_estimation(
         )
     if marge_avertissement:
         embed_principal.add_field(name="⚠️ Attention", value=marge_avertissement, inline=False)
+
+    # --- Verdict "ça vaut le coup ?" + temps de vente estimé ---
+    marge_pct_reelle = ((prix_conseille - prix_achat) / prix_achat * 100) if prix_achat else None
+    ventes_similaires = _ventes_similaires(interaction.user.id, article)
+    texte_temps, jours_moyens, est_reel = _estimer_temps_vente(ventes_similaires, demande_moyenne, len(items))
+    verdict, raisons = _evaluer_opportunite(len(items), demande_moyenne, marge_pct_reelle, jours_moyens)
+
+    embed_principal.add_field(name="🧭 Ça vaut le coup ?", value=f"**{verdict}**\n" + "\n".join(raisons), inline=False)
+    embed_principal.add_field(
+        name="⏳ Temps de vente estimé",
+        value=texte_temps + ("" if est_reel else "\n-# Vinted ne communique pas la durée réelle de vente : estimation approximative."),
+        inline=False,
+    )
+
     sous_texte = f"Basé sur {len(items)} annonces comparables"
     if nb_exclus:
         sous_texte += f" ({nb_exclus} valeur(s) extrême(s) écartée(s) du calcul)"
@@ -1829,7 +1938,9 @@ async def estimer(interaction: discord.Interaction, photo: Optional[discord.Atta
             "2️⃣ Décris l'article (marque, type, taille, état)\n"
             "3️⃣ Indique ce que tu l'as payé (optionnel, pour viser un bénéfice)\n"
             "4️⃣ Le bot analyse des dizaines d'annonces similaires sur Vinted et te propose "
-            "le prix le plus adapté, avec les annonces comparables les plus populaires."
+            "le prix le plus adapté, un verdict 🧭 (ça vaut le coup ou pas) basé sur la demande, la "
+            "concurrence et ta marge, et un temps de vente estimé (basé sur tes ventes similaires si "
+            "tu en as déjà enregistré via `/suivi`)."
         ),
         color=discord.Color.from_rgb(88, 101, 242),
     )
