@@ -883,6 +883,29 @@ ventes_enregistrees = _charger_ventes()
 _compteur_id_vente = itertools.count(max([v["id"] for v in ventes_enregistrees], default=0) + 1)
 
 
+COMMANDES_FICHIER = Path("/tmp/commandes_prevues.json")
+
+
+def _charger_commandes():
+    if COMMANDES_FICHIER.exists():
+        try:
+            return json.loads(COMMANDES_FICHIER.read_text())
+        except Exception as e:
+            print(f"[commandes] échec de lecture du fichier, on repart de zéro : {e}")
+    return []
+
+
+async def _sauver_commandes():
+    try:
+        await asyncio.to_thread(COMMANDES_FICHIER.write_text, json.dumps(commandes_prevues))
+    except Exception as e:
+        print(f"[commandes] échec de sauvegarde : {e}")
+
+
+commandes_prevues = _charger_commandes()
+_compteur_id_commande = itertools.count(max([c["id"] for c in commandes_prevues], default=0) + 1)
+
+
 def _barre_texte(valeur, valeur_max, longueur=10):
     if valeur_max <= 0:
         rempli = 0
@@ -1198,6 +1221,157 @@ def _mes_commandes_en_ligne(user_id: int) -> list:
     return list(reversed(mes_commandes))[:25]
 
 
+class CommandeAjouterModal(discord.ui.Modal, title="🛒 Nouvelle commande à passer"):
+    article = discord.ui.TextInput(label="Article à acheter", placeholder="ex: Sac à main vintage Coach", required=True, max_length=200)
+    prix_prevu = discord.ui.TextInput(
+        label="Budget prévu en € (optionnel)",
+        placeholder="ex: 20 — laisse vide si tu ne sais pas encore",
+        required=False,
+        max_length=10,
+    )
+    lien = discord.ui.TextInput(
+        label="Lien de l'annonce (optionnel)",
+        placeholder="ex: https://www.vinted.fr/items/...",
+        required=False,
+        max_length=300,
+    )
+    note = discord.ui.TextInput(
+        label="Note (optionnel)",
+        style=discord.TextStyle.paragraph,
+        placeholder="ex: attendre une baisse de prix, vérifier la taille...",
+        required=False,
+        max_length=300,
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        prix_prevu_val = None
+        if self.prix_prevu.value and self.prix_prevu.value.strip():
+            try:
+                prix_prevu_val = float(self.prix_prevu.value.strip().replace(",", "."))
+            except ValueError:
+                await interaction.response.send_message("⚠️ Le budget doit être un nombre (ex: 20 ou 19.90).", ephemeral=True)
+                return
+
+        nouvelle = {
+            "id": next(_compteur_id_commande),
+            "user_id": interaction.user.id,
+            "article": self.article.value.strip()[:200],
+            "prix_prevu": prix_prevu_val,
+            "lien": self.lien.value.strip()[:300] if self.lien.value else None,
+            "note": self.note.value.strip()[:300] if self.note.value else None,
+            "statut": "a_passer",
+            "date": discord.utils.utcnow().isoformat(),
+        }
+        commandes_prevues.append(nouvelle)
+        await _sauver_commandes()
+
+        texte = f"🛒 Commande `#{nouvelle['id']}` ajoutée : **{nouvelle['article']}**"
+        if prix_prevu_val is not None:
+            texte += f" (~{prix_prevu_val:.2f} €)"
+        texte += "\nUne fois achetée, choisis ✅ **Marquer une commande passée** dans `/suivi`."
+        await interaction.response.send_message(texte, ephemeral=True)
+
+
+def _mes_commandes_a_passer(user_id: int) -> list:
+    """Commandes encore à acheter (statut 'a_passer'), les plus récentes en premier — ce sont les
+    candidates pour être marquées 'passee' (achetée)."""
+    mes_commandes = [c for c in commandes_prevues if c["user_id"] == user_id and c["statut"] == "a_passer"]
+    return list(reversed(mes_commandes))[:25]  # limite Discord : 25 options max dans un menu déroulant
+
+
+class CommandeMarquerPasseeModal(discord.ui.Modal, title="✅ Marquer comme achetée"):
+    prix_reel = discord.ui.TextInput(
+        label="Prix réel payé en € (optionnel)",
+        placeholder="ex: 18 — laisse vide si identique au budget prévu",
+        required=False,
+        max_length=10,
+    )
+
+    def __init__(self, commande: dict):
+        super().__init__()
+        self.commande = commande
+
+    async def on_submit(self, interaction: discord.Interaction):
+        prix_reel_val = None
+        if self.prix_reel.value and self.prix_reel.value.strip():
+            try:
+                prix_reel_val = float(self.prix_reel.value.strip().replace(",", "."))
+            except ValueError:
+                await interaction.response.send_message("⚠️ Le prix doit être un nombre (ex: 18 ou 17.90).", ephemeral=True)
+                return
+
+        for c in commandes_prevues:
+            if c["id"] == self.commande["id"] and c["user_id"] == interaction.user.id:
+                c["statut"] = "passee"
+                if prix_reel_val is not None:
+                    c["prix_prevu"] = prix_reel_val  # on remplace le budget prévu par le prix réel payé
+                break
+        await _sauver_commandes()
+
+        await interaction.response.send_message(
+            f"✅ **{self.commande['article']}** marqué comme achetée !\n"
+            "Une fois mis en ligne sur Vinted, choisis 📤 **Ajouter un article en ligne** dans `/suivi`.",
+            ephemeral=True,
+        )
+
+
+class CommandeSelectPourPassee(discord.ui.Select):
+    def __init__(self, commandes: list):
+        options = []
+        for c in commandes:
+            prix_txt = f" — ~{c['prix_prevu']:.2f} €" if c.get("prix_prevu") is not None else ""
+            options.append(discord.SelectOption(
+                label=c["article"][:100],
+                description=f"Commande #{c['id']}{prix_txt}"[:100],
+                value=str(c["id"]),
+            ))
+        super().__init__(placeholder="Quel article viens-tu d'acheter ?", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        id_choisi = int(self.values[0])
+        commande = next(
+            (c for c in commandes_prevues if c["id"] == id_choisi and c["user_id"] == interaction.user.id),
+            None,
+        )
+        if commande is None or commande["statut"] != "a_passer":
+            await interaction.response.send_message(
+                "⚠️ Cette commande n'est plus disponible (déjà marquée achetée entre-temps ?).",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(CommandeMarquerPasseeModal(commande))
+
+
+class CommandeSelectPourPasseeView(discord.ui.View):
+    def __init__(self, commandes: list):
+        super().__init__(timeout=180)
+        self.add_item(CommandeSelectPourPassee(commandes))
+
+
+class CommandeSupprimerModal(discord.ui.Modal, title="🗑️ Supprimer une commande"):
+    id_commande = discord.ui.TextInput(label="Numéro de la commande", placeholder="ex: 3", required=True, max_length=10)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            id_val = int(self.id_commande.value.strip().lstrip("#"))
+        except ValueError:
+            await interaction.response.send_message("⚠️ Le numéro doit être un nombre entier (ex: 3).", ephemeral=True)
+            return
+
+        avant = len(commandes_prevues)
+        commandes_prevues[:] = [
+            c for c in commandes_prevues if not (c["id"] == id_val and c["user_id"] == interaction.user.id)
+        ]
+        await _sauver_commandes()
+
+        if len(commandes_prevues) < avant:
+            await interaction.response.send_message(f"🗑️ Commande `#{id_val}` supprimée.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "Aucune commande trouvée avec ce numéro (elle ne t'appartient peut-être pas).", ephemeral=True
+            )
+
+
 class CommandeEnLigneModal(discord.ui.Modal, title="📤 Mettre en ligne"):
     prix_annonce = discord.ui.TextInput(
         label="Prix affiché sur l'annonce en € (optionnel)",
@@ -1331,7 +1505,18 @@ class SuiviSelect(discord.ui.Select):
             await interaction.response.send_modal(CommandeAjouterModal())
 
         elif choix == "commande_marquer":
-            await interaction.response.send_modal(CommandeMarquerPasseeModal())
+            commandes = _mes_commandes_a_passer(interaction.user.id)
+            if not commandes:
+                await interaction.response.send_message(
+                    "Tu n'as aucune commande à passer pour le moment. Ajoute-en une avec 🛒 **Ajouter une commande**.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_message(
+                "Quel article viens-tu d'acheter ? 👇",
+                view=CommandeSelectPourPasseeView(commandes),
+                ephemeral=True,
+            )
 
         elif choix == "commande_supprimer":
             await interaction.response.send_modal(CommandeSupprimerModal())
