@@ -1306,8 +1306,6 @@ class SuiviSelect(discord.ui.Select):
         options = [
             discord.SelectOption(label="Ajouter une commande", value="commande_ajouter", emoji="🛒",
                                   description="Note un article que tu comptes acheter pour revendre"),
-            discord.SelectOption(label="Commandes à passer", value="commande_liste", emoji="📋",
-                                  description="Ce que tu comptes encore acheter"),
             discord.SelectOption(label="Marquer une commande passée", value="commande_marquer", emoji="✅",
                                   description="Une fois l'achat fait"),
             discord.SelectOption(label="Supprimer une commande", value="commande_supprimer", emoji="🗑️",
@@ -1331,16 +1329,6 @@ class SuiviSelect(discord.ui.Select):
 
         if choix == "commande_ajouter":
             await interaction.response.send_modal(CommandeAjouterModal())
-
-        elif choix == "commande_liste":
-            embed = _embed_liste_commandes(interaction, "a_passer")
-            if embed is None:
-                await interaction.response.send_message(
-                    "Aucune commande en attente. Choisis 🛒 Ajouter une commande pour en noter une.",
-                    ephemeral=True,
-                )
-                return
-            await interaction.response.send_message(embed=embed, ephemeral=True)
 
         elif choix == "commande_marquer":
             await interaction.response.send_modal(CommandeMarquerPasseeModal())
@@ -1423,7 +1411,7 @@ async def suivi(interaction: discord.Interaction, photo: Optional[discord.Attach
             "🛒 Ajouter une commande → ✅ Marquer passée (achetée) → 📤 Ajouter un article en ligne "
             "(mis en vente) → 💰 Marquer vendu (finalise la vente, pré-rempli)\n\n"
             "**Autres actions**\n"
-            "📋 À passer · 🗑️ Supprimer une commande · 🧾 Mes ventes · 🗑️ Supprimer une vente · 📊 Mon bilan"
+            "🗑️ Supprimer une commande · 🧾 Mes ventes · 🗑️ Supprimer une vente · 📊 Mon bilan"
         ),
         color=discord.Color.from_rgb(255, 190, 60),
     )
