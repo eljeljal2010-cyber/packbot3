@@ -904,7 +904,8 @@ def _embed_liste_ventes(interaction: discord.Interaction) -> Optional[discord.Em
             texte_prix = f"annoncée {prix_annonce:.2f} € → **{v['prix_vente']:.2f} €**"
         else:
             texte_prix = f"**{v['prix_vente']:.2f} €**"
-        lignes.append(f"`#{v['id']}` — {v['article']} — {texte_prix}{prix_achat_txt}")
+        photo_txt = " 📷" if v.get("photo_url") else ""
+        lignes.append(f"`#{v['id']}` — {v['article']} — {texte_prix}{prix_achat_txt}{photo_txt}")
     embed = discord.Embed(
         title="🧾 Tes dernières ventes",
         description="\n".join(lignes),
@@ -991,23 +992,28 @@ def _embed_bilan_ventes(interaction: discord.Interaction) -> Optional[discord.Em
 
 
 def _parser_duree_en_jours(texte: str) -> Optional[float]:
-    """Parse une durée écrite en français de façon flexible (ex: '5', '5j', '5 jours', '2 semaines',
-    '3 mois', '10h') et retourne l'équivalent en jours (float), ou None si le texte est vide/invalide."""
+    """Extrait un nombre de jours d'un texte de durée écrit librement (ex: '5', '5j', '2 semaines',
+    '1 semaine 3 jours', '10h', 'environ 3 jours'...). Additionne tous les segments nombre+unité
+    trouvés, où qu'ils soient dans le texte — jamais de rejet strict, l'utilisateur doit pouvoir
+    écrire comme il veut. Retourne None seulement si vraiment aucun nombre n'a pu être trouvé."""
     if not texte or not texte.strip():
         return None
     t = texte.strip().lower().replace(",", ".")
-    match = re.match(r"^(\d+(?:\.\d+)?)\s*([a-zéè.]*)$", t)
-    if not match:
-        return None
-    valeur = float(match.group(1))
-    unite = match.group(2).rstrip(".")
-    if unite in ("h", "heure", "heures"):
-        return valeur / 24
-    if unite in ("sem", "semaine", "semaines"):
-        return valeur * 7
-    if unite in ("mois", "m"):
-        return valeur * 30
-    return valeur  # vide, 'j', 'jour', 'jours', ou toute autre unité non reconnue → traité comme des jours
+    total = 0.0
+    trouve = False
+    for match in re.finditer(r"(\d+(?:\.\d+)?)\s*(heures?|h\b|semaines?|sem\.?|mois|jours?|jrs?|j\b)?", t):
+        valeur = float(match.group(1))
+        unite = (match.group(2) or "").strip().rstrip(".")
+        trouve = True
+        if unite.startswith("heure") or unite == "h":
+            total += valeur / 24
+        elif unite.startswith("sem"):
+            total += valeur * 7
+        elif unite == "mois":
+            total += valeur * 30
+        else:
+            total += valeur  # pas d'unité, ou 'j'/'jour(s)'/'jrs' → traité comme des jours
+    return total if trouve else None
 
 
 def _formater_duree(jours: float) -> str:
@@ -1040,6 +1046,10 @@ class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
         max_length=20,
     )
 
+    def __init__(self, photo: Optional[discord.Attachment] = None):
+        super().__init__()
+        self.photo = photo
+
     async def on_submit(self, interaction: discord.Interaction):
         try:
             prix_vente_val = float(self.prix_vente.value.strip().replace(",", "."))
@@ -1063,14 +1073,10 @@ class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
                 await interaction.response.send_message("⚠️ Le prix de l'annonce doit être un nombre (ex: 30 ou 29.90).", ephemeral=True)
                 return
 
-        jours_en_ligne_val = None
-        if self.temps_en_ligne.value and self.temps_en_ligne.value.strip():
-            jours_en_ligne_val = _parser_duree_en_jours(self.temps_en_ligne.value)
-            if jours_en_ligne_val is None or jours_en_ligne_val < 0:
-                await interaction.response.send_message(
-                    "⚠️ Durée non reconnue (ex: 5, 5j, 2 semaines, 10h).", ephemeral=True
-                )
-                return
+        temps_en_ligne_texte = self.temps_en_ligne.value.strip() if self.temps_en_ligne.value else ""
+        jours_en_ligne_val = _parser_duree_en_jours(temps_en_ligne_texte) if temps_en_ligne_texte else None
+        # Si vraiment aucun nombre n'a pu être extrait (ex: "je sais pas"), on n'utilise juste pas cette
+        # info dans les moyennes du bilan, mais on n'empêche JAMAIS d'enregistrer la vente pour ça.
 
         date_vente = discord.utils.utcnow()
         date_mise_en_ligne = (date_vente - timedelta(days=jours_en_ligne_val)) if jours_en_ligne_val is not None else None
@@ -1083,8 +1089,10 @@ class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
             "prix_vente": prix_vente_val,
             "prix_achat": prix_achat_val,
             "jours_en_ligne": jours_en_ligne_val,
+            "temps_en_ligne_texte": temps_en_ligne_texte or None,
             "date": date_vente.isoformat(),
             "date_mise_en_ligne": date_mise_en_ligne.isoformat() if date_mise_en_ligne else None,
+            "photo_url": self.photo.url if self.photo else None,
         }
         ventes_enregistrees.append(nouvelle)
         await _sauver_ventes()
@@ -1093,14 +1101,18 @@ class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
             texte_prix = f"annoncée à {prix_annonce_val:.2f} € → vendue **{prix_vente_val:.2f} €**"
         else:
             texte_prix = f"vendue **{prix_vente_val:.2f} €**"
-        texte = f"✅ Vente `#{nouvelle['id']}` enregistrée : **{nouvelle['article']}** — {texte_prix}"
+        description = f"**{nouvelle['article']}** — {texte_prix}"
         if prix_achat_val is not None:
             benefice = round(prix_vente_val - prix_achat_val, 2)
-            texte += f" (achetée {prix_achat_val:.2f} € → {'bénéfice' if benefice >= 0 else 'perte'} de {abs(benefice):.2f} €)"
-        if jours_en_ligne_val is not None:
-            texte += f"\n🕐 En ligne {_formater_duree(jours_en_ligne_val)} avant la vente."
-        texte += "\nRelance `/vente` puis 📊 pour voir ton bilan complet."
-        await interaction.response.send_message(texte, ephemeral=True)
+            description += f" (achetée {prix_achat_val:.2f} € → {'bénéfice' if benefice >= 0 else 'perte'} de {abs(benefice):.2f} €)"
+        if temps_en_ligne_texte:
+            description += f"\n🕐 En ligne **{temps_en_ligne_texte}** avant la vente."
+        description += "\nRelance `/vente` puis 📊 pour voir ton bilan complet."
+
+        embed = discord.Embed(title=f"✅ Vente #{nouvelle['id']} enregistrée", description=description, color=discord.Color.green())
+        if self.photo:
+            embed.set_thumbnail(url=self.photo.url)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class VenteSupprimerModal(discord.ui.Modal, title="🗑️ Supprimer une vente"):
@@ -1133,12 +1145,13 @@ class VenteSupprimerModal(discord.ui.Modal, title="🗑️ Supprimer une vente")
 
 
 class VenteIntroView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, photo: Optional[discord.Attachment] = None):
         super().__init__(timeout=None)
+        self.photo = photo
 
     @discord.ui.button(label="Ajouter une vente", style=discord.ButtonStyle.success, emoji="➕", custom_id="vente_ajouter_bouton")
     async def ajouter(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(VenteAjouterModal())
+        await interaction.response.send_modal(VenteAjouterModal(photo=self.photo))
 
     @discord.ui.button(label="Mes ventes", style=discord.ButtonStyle.secondary, emoji="🧾", custom_id="vente_liste_bouton")
     async def liste(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1168,14 +1181,17 @@ class VenteIntroView(discord.ui.View):
 
 
 @bot.tree.command(name="vente", description="Suivi de tes ventes personnelles : ajouter, liste, supprimer, bilan")
-async def vente(interaction: discord.Interaction):
+@app_commands.describe(photo="Photo de l'article vendu (optionnel, jointe à la vente si tu cliques sur ➕ Ajouter)")
+async def vente(interaction: discord.Interaction, photo: Optional[discord.Attachment] = None):
     embed = discord.Embed(
         title="💰 Suivi de tes ventes",
         description=(
             "Garde une trace de ce que tu vends sur Vinted, et suis ton bénéfice au fil du temps.\n\n"
             "**Comment ça marche ?**\n"
             "➕ **Ajouter une vente** — renseigne l'article, le prix vendu, et en option le prix affiché "
-            "sur l'annonce (si différent), le prix d'achat, et le nombre de jours en ligne avant la vente\n"
+            "sur l'annonce (si différent), le prix d'achat, et le temps en ligne avant la vente (tu peux "
+            "écrire ce que tu veux : '5j', '2 semaines', '10h'...). Joins une photo à cette commande "
+            "`/vente` pour qu'elle soit gardée avec la vente.\n"
             "🧾 **Mes ventes** — tes 15 dernières ventes, avec leur numéro (utile pour en supprimer une)\n"
             "🗑️ **Supprimer** — corrige une erreur de saisie avec le numéro de la vente\n"
             "📊 **Mon bilan** — depuis quand tu vends, chiffre d'affaires, bénéfice cumulé, marge moyenne, "
@@ -1183,8 +1199,10 @@ async def vente(interaction: discord.Interaction):
         ),
         color=discord.Color.from_rgb(255, 215, 0),
     )
+    if photo:
+        embed.set_thumbnail(url=photo.url)
     embed.set_footer(text="Chaque personne ne voit que ses propres ventes, en privé.")
-    view = VenteIntroView()
+    view = VenteIntroView(photo=photo)
     await interaction.response.send_message(embed=embed, view=view)
 
 
