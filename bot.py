@@ -40,7 +40,7 @@ if GROQ_API_KEY:
 else:
     print(
         "⚠️ ATTENTION : GROQ_API_KEY n'est pas défini. Le bot démarre quand même (/poster, /estimer, "
-        "/recherche, les alertes restent fonctionnels), mais le chat IA et /description répondront "
+        "les alertes restent fonctionnels), mais le chat IA et /description répondront "
         "avec un message d'erreur clair tant que la variable n'est pas ajoutée sur Railway."
     )
 # ⚠️ llama-3.3-70b-versatile est déprécié par Groq (arrêt prévu le 16/08/2026) et
@@ -360,7 +360,6 @@ async def on_ready():
     # (sans ça, Discord affiche une erreur sur les anciens boutons après chaque redéploiement Railway).
     bot.add_view(EstimerIntroView())
     bot.add_view(AnnonceIntroView())
-    bot.add_view(RechercheIntroView())
     bot.add_view(SuiviView())
 
     if not verifier_alertes.is_running():
@@ -1706,6 +1705,55 @@ def _evaluer_opportunite(nb_annonces: int, demande_moyenne: float, marge_pct: Op
     return verdict, raisons
 
 
+async def _analyser_photo_pour_estimation(article: str, photo: discord.Attachment) -> Optional[str]:
+    """Utilise le modèle vision pour repérer, sur la photo jointe, des mots-clés utiles à la
+    recherche d'annonces comparables (marque si visible, type précis, couleur, matière...) qui
+    viennent compléter la description texte du vendeur. Retourne None si l'analyse échoue ou n'a
+    rien apporté — l'estimation continue alors avec la description texte seule."""
+    try:
+        _verifier_groq_disponible()
+    except GroqNonConfigure:
+        return None
+
+    instruction_systeme = (
+        "Tu regardes la photo d'un article mis en vente sur Vinted, avec la description donnée par "
+        "le vendeur. Ta seule tâche : identifier, à partir de ce qui est RÉELLEMENT visible sur la "
+        "photo, des mots-clés qui aideraient à trouver des annonces comparables sur Vinted (marque "
+        "si le logo/l'étiquette est visible, type précis d'article, couleur dominante, matière si "
+        "reconnaissable). N'invente jamais un détail non visible. Réponds STRICTEMENT avec une courte "
+        "liste de mots-clés en français séparés par des espaces (pas de phrase, pas de ponctuation, "
+        "pas d'explication). Si la photo n'apporte rien de plus que la description, réponds "
+        "exactement avec la description donnée telle quelle, sans rien ajouter."
+    )
+    contenu_msg = [
+        {"type": "text", "text": f"Description donnée par le vendeur : {article}"},
+        {"type": "image_url", "image_url": {"url": photo.url}},
+    ]
+    appel_kwargs = dict(
+        model=MODELE_VISION,
+        max_tokens=100,
+        temperature=0.3,
+        messages=[
+            {"role": "system", "content": instruction_systeme},
+            {"role": "user", "content": contenu_msg},
+        ],
+    )
+    options = _options_raisonnement(MODELE_VISION)
+    try:
+        reponse = await asyncio.to_thread(groq_client.chat.completions.create, **{**appel_kwargs, **options})
+    except Exception:
+        try:
+            reponse = await asyncio.to_thread(groq_client.chat.completions.create, **appel_kwargs)
+        except Exception as e:
+            print(f"[estimer] analyse photo échouée : {e}")
+            return None
+
+    texte = (reponse.choices[0].message.content or "").strip()
+    if not texte or texte.lower() == article.strip().lower():
+        return None
+    return texte
+
+
 async def _lancer_estimation(
     interaction: discord.Interaction,
     article: str,
@@ -1715,6 +1763,12 @@ async def _lancer_estimation(
     photo: Optional[discord.Attachment],
 ):
     requete = article.strip()
+    mots_cles_photo = None
+    if photo is not None:
+        mots_cles_photo = await _analyser_photo_pour_estimation(article, photo)
+        if mots_cles_photo:
+            requete = mots_cles_photo
+            print(f"[estimer] recherche affinée grâce à la photo : {requete!r}")
     print(f"[estimer] requête envoyée à Vinted : {requete!r}")
 
     try:
@@ -1804,6 +1858,12 @@ async def _lancer_estimation(
     )
     embed_principal.timestamp = discord.utils.utcnow()
     embed_principal.add_field(name="🛍️ Article", value=f"**{article}**", inline=False)
+    if mots_cles_photo:
+        embed_principal.add_field(
+            name="📸 Recherche affinée grâce à ta photo",
+            value=f"`{mots_cles_photo}`",
+            inline=False,
+        )
     embed_principal.add_field(name="💶 Prix moyen", value=f"{prix_moyen:.2f} €", inline=True)
     embed_principal.add_field(name="↔️ Fourchette", value=f"{prix_min:.2f} € – {prix_max:.2f} €", inline=True)
     embed_principal.add_field(
@@ -1955,7 +2015,7 @@ class EstimerIntroView(discord.ui.View):
 
 @bot.tree.command(name="estimer", description="Estime le prix de vente d'un article à partir d'annonces Vinted comparables")
 @app_commands.describe(
-    photo="Photo de l'article à vendre (optionnel, juste pour l'affichage)"
+    photo="Photo de l'article (optionnel) — analysée par l'IA pour affiner la recherche et estimer plus précisément"
 )
 async def estimer(interaction: discord.Interaction, photo: Optional[discord.Attachment] = None):
     embed = discord.Embed(
@@ -1963,13 +2023,16 @@ async def estimer(interaction: discord.Interaction, photo: Optional[discord.Atta
         description=(
             "Ce petit outil t'aide à fixer le meilleur prix de vente pour un article.\n\n"
             "**Comment ça marche ?**\n"
-            "1️⃣ Clique sur le bouton ci-dessous\n"
-            "2️⃣ Décris l'article (marque, type, taille, état)\n"
-            "3️⃣ Indique ce que tu l'as payé, le prix auquel tu veux le vendre, et/ou le délai visé "
+            "1️⃣ Joins une photo directement à cette commande si tu en as une (optionnel, mais ça "
+            "rend l'estimation plus précise — l'IA repère la marque, la couleur, la matière...)\n"
+            "2️⃣ Clique sur le bouton ci-dessous\n"
+            "3️⃣ Décris l'article (marque, type, taille, état)\n"
+            "4️⃣ Indique ce que tu l'as payé, le prix auquel tu veux le vendre, et/ou le délai visé "
             "(tout optionnel — laisse vide pour un prix conseillé automatique)\n"
-            "4️⃣ Le bot analyse des dizaines d'annonces similaires sur Vinted et te donne un verdict 🧭 "
-            "(ça vaut le coup ou pas) basé sur la demande, la concurrence et ta marge, et un temps de "
-            "vente estimé (basé sur tes ventes similaires si tu en as déjà enregistré via `/suivi`)."
+            "5️⃣ Le bot analyse des dizaines d'annonces similaires sur Vinted (affinées grâce à ta "
+            "photo si tu en as joint une) et te donne un verdict 🧭 (ça vaut le coup ou pas) basé sur "
+            "la demande, la concurrence et ta marge, et un temps de vente estimé (basé sur tes ventes "
+            "similaires si tu en as déjà enregistré via `/suivi`)."
         ),
         color=discord.Color.from_rgb(88, 101, 242),
     )
@@ -2285,163 +2348,6 @@ async def description(
         embed.set_thumbnail(url=photo.url)
     embed.set_footer(text=f"Ton sélectionné : {TONS_ANNONCE_LABELS.get(ton_key, ton_key)} • Généré par IA, à relire avant publication.")
     view = AnnonceIntroView(photo=photo, ton_key=ton_key)
-    await interaction.response.send_message(embed=embed, view=view)
-
-
-# ============================================================
-#  Commande /recherche — parcourir des annonces Vinted (achat)
-# ============================================================
-
-def _signaux_vigilance(prix, favoris, prix_median):
-    """Détecte quelques signaux simples (pas une certitude, juste des indices à vérifier soi-même)
-    à partir des données déjà publiques de l'annonce : prix très en dessous du marché, ou annonce
-    encore sans aucun favori."""
-    signaux = []
-    if prix is not None and prix_median and prix < prix_median * 0.4:
-        signaux.append("💸 Prix nettement en dessous du marché — vérifie bien les photos et le profil du vendeur avant de payer.")
-    if not favoris:
-        signaux.append("👀 Aucun favori pour l'instant — une annonce très récente ou peu visible, reste prudent.")
-    return signaux
-
-
-class RechercheGalerieView(GalerieView):
-    """Galerie de résultats de /recherche : mêmes flèches que /estimer, plus un signal de vigilance
-    par annonce et un bouton pour transformer directement la recherche en alerte de prix."""
-
-    def __init__(self, items, embed_principal, requete: str, prix_max: Optional[float], prix_median: Optional[float]):
-        self.prix_median = prix_median
-        super().__init__(items, embed_principal)
-        self.requete = requete
-        self.prix_max = prix_max
-
-    def _embed_item_courant(self) -> discord.Embed:
-        e = super()._embed_item_courant()
-        i = self.items[self.index]
-        signaux = _signaux_vigilance(_prix_de(i), _favoris_de(i), self.prix_median)
-        if signaux:
-            e.add_field(name="⚠️ À vérifier avant d'acheter", value="\n".join(signaux), inline=False)
-        return e
-
-    @discord.ui.button(label="Créer une alerte pour cette recherche", style=discord.ButtonStyle.primary, emoji="🔔", row=1)
-    async def creer_alerte(self, interaction: discord.Interaction, button: discord.ui.Button):
-        ok, message = await _creer_alerte(interaction.user.id, self.requete, self.prix_max)
-        await interaction.response.send_message(message, ephemeral=True)
-
-
-async def _lancer_recherche(interaction: discord.Interaction, requete_texte: str, prix_max_texte: Optional[str]):
-    requete = requete_texte.strip()
-    prix_max = None
-    if prix_max_texte and prix_max_texte.strip():
-        try:
-            prix_max = float(prix_max_texte.strip().replace(",", "."))
-        except ValueError:
-            await interaction.followup.send(
-                "⚠️ Le prix maximum doit être un nombre (ex: 30 ou 29.90). Recherche relancée sans filtre de prix.",
-                ephemeral=True,
-            )
-            prix_max = None
-
-    try:
-        items = await _rechercher_vinted_cache(requete, per_page=50)
-    except asyncio.TimeoutError:
-        await interaction.followup.send("⏱️ Vinted met trop de temps à répondre. Réessaie dans quelques minutes.", ephemeral=True)
-        return
-    except VintedAuthError:
-        await interaction.followup.send(
-            "🚫 Vinted a temporairement bloqué la connexion (ça arrive régulièrement avec les hébergeurs gratuits). "
-            "Ce n'est pas systématique — réessaie dans quelques minutes, ça passe souvent au 2e ou 3e essai.",
-            ephemeral=True,
-        )
-        return
-    except VintedRateLimitError:
-        await interaction.followup.send(
-            "🚫 Vinted a temporairement limité les requêtes (trop de recherches d'un coup). Réessaie dans quelques minutes.",
-            ephemeral=True,
-        )
-        return
-    except (VintedNetworkError, VintedAPIError, VintedError) as e:
-        await interaction.followup.send(f"❌ Erreur Vinted : `{e}`", ephemeral=True)
-        return
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erreur inattendue pendant la recherche : `{e}`", ephemeral=True)
-        return
-
-    if prix_max is not None:
-        items = [i for i in items if (_prix_de(i) or 0) <= prix_max]
-
-    embed_principal = discord.Embed(
-        title="🛍️ Résultats de recherche Vinted",
-        color=discord.Color.from_rgb(255, 140, 0),
-    )
-    embed_principal.timestamp = discord.utils.utcnow()
-    embed_principal.add_field(name="🔎 Recherche", value=f"**{requete}**", inline=False)
-    if prix_max is not None:
-        embed_principal.add_field(name="💶 Prix max", value=f"{prix_max:.2f} €", inline=True)
-    embed_principal.add_field(name="📦 Annonces trouvées", value=str(len(items)), inline=True)
-
-    if not items:
-        embed_principal.description = "Aucune annonce ne correspond à cette recherche pour le moment. Essaie une description plus générale."
-        await interaction.followup.send(embed=embed_principal, ephemeral=True)
-        return
-
-    prix_connus = [p for p in (_prix_de(i) for i in items) if p is not None]
-    prix_median = statistics.median(prix_connus) if prix_connus else None
-
-    top = items[:15]
-    vue = RechercheGalerieView(top, embed_principal, requete, prix_max, prix_median)
-    vue.message = await interaction.followup.send(
-        embeds=[embed_principal, vue._embed_item_courant()], view=vue, ephemeral=True
-    )
-
-
-class RechercheModal(discord.ui.Modal, title="🛍️ Nouvelle recherche Vinted"):
-    requete = discord.ui.TextInput(
-        label="Que cherches-tu ?",
-        placeholder="ex: nike air force taille 42",
-        required=True,
-        max_length=150,
-    )
-    prix_max = discord.ui.TextInput(
-        label="Prix maximum en € (optionnel)",
-        placeholder="ex: 30",
-        required=False,
-        max_length=10,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(thinking=True, ephemeral=True)
-        await _lancer_recherche(interaction, self.requete.value, self.prix_max.value)
-
-
-class RechercheIntroView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Rechercher", style=discord.ButtonStyle.success, emoji="🛍️", custom_id="recherche_lancer_bouton")
-    async def lancer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(RechercheModal())
-
-
-@bot.tree.command(name="recherche", description="Parcourt des annonces Vinted correspondant à ta recherche")
-async def recherche(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🛍️ Recherche Vinted",
-        description=(
-            "Donne ce que tu cherches, et le bot te ramène les annonces Vinted correspondantes, "
-            "à parcourir directement ici avec les flèches.\n\n"
-            "**Comment ça marche ?**\n"
-            "1️⃣ Clique sur le bouton ci-dessous\n"
-            "2️⃣ Décris ce que tu cherches (ex: nike air force taille 42)\n"
-            "3️⃣ Indique un prix maximum si tu veux filtrer (optionnel)\n"
-            "4️⃣ Parcours les annonces trouvées avec les flèches ◀ ▶, chacune avec un lien direct, "
-            "un signal ⚠️ si le prix semble anormalement bas ou l'annonce très peu vue\n"
-            "5️⃣ Rien ne te convient encore ? Clique sur 🔔 pour transformer ta recherche en alerte "
-            "et être prévenu(e) dès qu'une bonne annonce correspondante apparaît."
-        ),
-        color=discord.Color.from_rgb(255, 140, 0),
-    )
-    embed.set_footer(text="Données publiques Vinted, à titre indicatif.")
-    view = RechercheIntroView()
     await interaction.response.send_message(embed=embed, view=view)
 
 
