@@ -1192,7 +1192,8 @@ def _mes_commandes_passees(user_id: int) -> list:
 
 
 class CommandeSelectPourVente(discord.ui.Select):
-    def __init__(self, commandes: list):
+    def __init__(self, commandes: list, photo: Optional[discord.Attachment] = None):
+        self.photo = photo
         options = []
         for c in commandes:
             prix_txt = f" — ~{c['prix_prevu']:.2f} €" if c.get("prix_prevu") is not None else ""
@@ -1215,13 +1216,13 @@ class CommandeSelectPourVente(discord.ui.Select):
                 ephemeral=True,
             )
             return
-        await interaction.response.send_modal(VenteAjouterModal(commande_liee=commande))
+        await interaction.response.send_modal(VenteAjouterModal(photo=self.photo, commande_liee=commande))
 
 
 class CommandeSelectPourVenteView(discord.ui.View):
-    def __init__(self, commandes: list):
+    def __init__(self, commandes: list, photo: Optional[discord.Attachment] = None):
         super().__init__(timeout=180)
-        self.add_item(CommandeSelectPourVente(commandes))
+        self.add_item(CommandeSelectPourVente(commandes, photo=photo))
 
 
 class SuiviSelect(discord.ui.Select):
@@ -1235,8 +1236,6 @@ class SuiviSelect(discord.ui.Select):
                                   description="Une fois l'achat fait"),
             discord.SelectOption(label="Supprimer une commande", value="commande_supprimer", emoji="🗑️",
                                   description="Corrige une erreur de saisie"),
-            discord.SelectOption(label="Ajouter une vente", value="vente_ajouter", emoji="➕",
-                                  description="Enregistre un article que tu viens de vendre"),
             discord.SelectOption(label="Vendre une commande", value="vente_depuis_commande", emoji="🔗",
                                   description="Convertit une commande achetée en vente (pré-rempli)"),
             discord.SelectOption(label="Mes ventes", value="vente_liste", emoji="🧾",
@@ -1271,9 +1270,6 @@ class SuiviSelect(discord.ui.Select):
         elif choix == "commande_supprimer":
             await interaction.response.send_modal(CommandeSupprimerModal())
 
-        elif choix == "vente_ajouter":
-            await interaction.response.send_modal(VenteAjouterModal(photo=photo))
-
         elif choix == "vente_depuis_commande":
             commandes = _mes_commandes_passees(interaction.user.id)
             if not commandes:
@@ -1286,7 +1282,7 @@ class SuiviSelect(discord.ui.Select):
             await interaction.response.send_message(
                 "Choisis la commande que tu viens de vendre 👇 (le formulaire de vente sera pré-rempli "
                 "avec l'article et le prix d'achat prévu) :",
-                view=CommandeSelectPourVenteView(commandes),
+                view=CommandeSelectPourVenteView(commandes, photo=photo),
                 ephemeral=True,
             )
 
@@ -1323,7 +1319,7 @@ class SuiviView(discord.ui.View):
 
 
 @bot.tree.command(name="suivi", description="Suivi complet achat/revente : commandes à passer et ventes, tout en un seul endroit")
-@app_commands.describe(photo="Photo de l'article vendu (optionnel, jointe si tu choisis Ajouter une vente)")
+@app_commands.describe(photo="Photo de l'article vendu (optionnel, jointe si tu choisis Vendre une commande)")
 async def suivi(interaction: discord.Interaction, photo: Optional[discord.Attachment] = None):
     embed = discord.Embed(
         title="🔁 Suivi achat/revente",
@@ -1334,7 +1330,7 @@ async def suivi(interaction: discord.Interaction, photo: Optional[discord.Attach
             "**Commandes**\n"
             "🛒 Ajouter · 📋 À passer · ✅ Marquer passée · 🗑️ Supprimer\n\n"
             "**Ventes**\n"
-            "➕ Ajouter · 🔗 Vendre une commande (pré-remplie) · 🧾 Mes ventes · 🗑️ Supprimer · 📊 Mon bilan"
+            "🔗 Vendre une commande (pré-remplie) · 🧾 Mes ventes · 🗑️ Supprimer · 📊 Mon bilan"
         ),
         color=discord.Color.from_rgb(255, 190, 60),
     )
