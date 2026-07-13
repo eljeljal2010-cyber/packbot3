@@ -645,8 +645,13 @@ async def _rechercher_vinted(requete: str, per_page: int = 50):
                     cookies_dir=Path("/tmp/vinted_cookies"),
                 ) as client:
                     return await client.search_items(url=url, per_page=per_page, raw_data=True)
-            except (VintedAuthError, VintedRateLimitError, VintedNetworkError, VintedAPIError) as e:
+            except Exception as e:
+                # Vinted répond parfois avec un corps vide/non-JSON en cas de blocage silencieux, ce
+                # qui fait lever à la librairie une erreur brute (ex: JSONDecodeError) plutôt qu'une
+                # VintedAuthError/VintedRateLimitError propre. On retente donc sur TOUTE exception ici
+                # plutôt que sur une liste de types précis, pour ne pas rater ce genre de cas.
                 derniere_erreur = e
+                print(f"[vinted] tentative {tentative + 1}/3 échouée pour '{requete}' : {e}")
                 if tentative < 2:
                     await asyncio.sleep(4 * (tentative + 1))
         raise derniere_erreur
