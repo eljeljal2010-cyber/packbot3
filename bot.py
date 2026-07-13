@@ -361,8 +361,7 @@ async def on_ready():
     bot.add_view(EstimerIntroView())
     bot.add_view(AnnonceIntroView())
     bot.add_view(RechercheIntroView())
-    bot.add_view(VenteIntroView())
-    bot.add_view(CommandeIntroView())
+    bot.add_view(SuiviView())
 
     if not verifier_alertes.is_running():
         verifier_alertes.start()
@@ -1124,7 +1123,7 @@ class VenteAjouterModal(discord.ui.Modal, title="➕ Nouvelle vente"):
             description += f"\n🕐 En ligne **{temps_en_ligne_texte}** avant la vente."
         if self.commande_liee:
             description += f"\n🔗 Liée à la commande `#{self.commande_liee['id']}`, désormais marquée comme vendue."
-        description += "\nRelance `/vente` puis 📊 pour voir ton bilan complet."
+        description += "\nRelance `/suivi` puis 📊 Mon bilan pour voir ton bilan complet."
 
         embed = discord.Embed(title=f"✅ Vente #{nouvelle['id']} enregistrée", description=description, color=discord.Color.green())
         if self.photo:
@@ -1225,304 +1224,125 @@ class CommandeSelectPourVenteView(discord.ui.View):
         self.add_item(CommandeSelectPourVente(commandes))
 
 
-class VenteIntroView(discord.ui.View):
+class SuiviSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Ajouter une commande", value="commande_ajouter", emoji="🛒",
+                                  description="Note un article que tu comptes acheter pour revendre"),
+            discord.SelectOption(label="Commandes à passer", value="commande_liste", emoji="📋",
+                                  description="Ce que tu comptes encore acheter"),
+            discord.SelectOption(label="Marquer une commande passée", value="commande_marquer", emoji="✅",
+                                  description="Une fois l'achat fait"),
+            discord.SelectOption(label="Supprimer une commande", value="commande_supprimer", emoji="🗑️",
+                                  description="Corrige une erreur de saisie"),
+            discord.SelectOption(label="Ajouter une vente", value="vente_ajouter", emoji="➕",
+                                  description="Enregistre un article que tu viens de vendre"),
+            discord.SelectOption(label="Vendre une commande", value="vente_depuis_commande", emoji="🔗",
+                                  description="Convertit une commande achetée en vente (pré-rempli)"),
+            discord.SelectOption(label="Mes ventes", value="vente_liste", emoji="🧾",
+                                  description="Tes 15 dernières ventes"),
+            discord.SelectOption(label="Supprimer une vente", value="vente_supprimer", emoji="🗑️",
+                                  description="Corrige une erreur de saisie"),
+            discord.SelectOption(label="Mon bilan", value="vente_bilan", emoji="📊",
+                                  description="Chiffre d'affaires, bénéfice, meilleures ventes"),
+        ]
+        super().__init__(placeholder="Que veux-tu faire ?", options=options, custom_id="suivi_select")
+
+    async def callback(self, interaction: discord.Interaction):
+        choix = self.values[0]
+        photo = getattr(self.view, "photo", None)
+
+        if choix == "commande_ajouter":
+            await interaction.response.send_modal(CommandeAjouterModal())
+
+        elif choix == "commande_liste":
+            embed = _embed_liste_commandes(interaction, "a_passer")
+            if embed is None:
+                await interaction.response.send_message(
+                    "Aucune commande en attente. Choisis 🛒 Ajouter une commande pour en noter une.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        elif choix == "commande_marquer":
+            await interaction.response.send_modal(CommandeMarquerPasseeModal())
+
+        elif choix == "commande_supprimer":
+            await interaction.response.send_modal(CommandeSupprimerModal())
+
+        elif choix == "vente_ajouter":
+            await interaction.response.send_modal(VenteAjouterModal(photo=photo))
+
+        elif choix == "vente_depuis_commande":
+            commandes = _mes_commandes_passees(interaction.user.id)
+            if not commandes:
+                await interaction.response.send_message(
+                    "Tu n'as aucune commande achetée en attente de vente. Marque d'abord une commande "
+                    "comme passée (✅), elle apparaîtra ici une fois éligible.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_message(
+                "Choisis la commande que tu viens de vendre 👇 (le formulaire de vente sera pré-rempli "
+                "avec l'article et le prix d'achat prévu) :",
+                view=CommandeSelectPourVenteView(commandes),
+                ephemeral=True,
+            )
+
+        elif choix == "vente_liste":
+            embed = _embed_liste_ventes(interaction)
+            if embed is None:
+                await interaction.response.send_message(
+                    "Aucune vente enregistrée. Choisis ➕ Ajouter une vente pour commencer ton suivi.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        elif choix == "vente_supprimer":
+            await interaction.response.send_modal(VenteSupprimerModal())
+
+        elif choix == "vente_bilan":
+            embed = _embed_bilan_ventes(interaction)
+            if embed is None:
+                await interaction.response.send_message(
+                    "Tu n'as encore aucune vente enregistrée. Ajoute ta première vente pour construire "
+                    "ton tableau de bord.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class SuiviView(discord.ui.View):
     def __init__(self, photo: Optional[discord.Attachment] = None):
         super().__init__(timeout=None)
         self.photo = photo
-
-    @discord.ui.button(label="Ajouter une vente", style=discord.ButtonStyle.success, emoji="➕", custom_id="vente_ajouter_bouton")
-    async def ajouter(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(VenteAjouterModal(photo=self.photo))
-
-    @discord.ui.button(label="Vendre une commande", style=discord.ButtonStyle.success, emoji="🔗", custom_id="vente_depuis_commande_bouton")
-    async def depuis_commande(self, interaction: discord.Interaction, button: discord.ui.Button):
-        commandes = _mes_commandes_passees(interaction.user.id)
-        if not commandes:
-            await interaction.response.send_message(
-                "Tu n'as aucune commande achetée en attente de vente. Utilise `/commande` puis ✅ "
-                "après avoir passé une commande, elle apparaîtra ici une fois vendue.",
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_message(
-            "Choisis la commande que tu viens de vendre 👇 (le formulaire de vente sera pré-rempli avec "
-            "l'article et le prix d'achat prévu) :",
-            view=CommandeSelectPourVenteView(commandes),
-            ephemeral=True,
-        )
-
-    @discord.ui.button(label="Mes ventes", style=discord.ButtonStyle.secondary, emoji="🧾", custom_id="vente_liste_bouton")
-    async def liste(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = _embed_liste_ventes(interaction)
-        if embed is None:
-            await interaction.response.send_message(
-                "Aucune vente enregistrée. Clique sur ➕ pour commencer ton suivi.", ephemeral=True
-            )
-            return
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Supprimer", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="vente_supprimer_bouton")
-    async def supprimer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(VenteSupprimerModal())
-
-    @discord.ui.button(label="Mon bilan", style=discord.ButtonStyle.primary, emoji="📊", custom_id="vente_bilan_bouton")
-    async def bilan(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = _embed_bilan_ventes(interaction)
-        if embed is None:
-            await interaction.response.send_message(
-                "Tu n'as encore aucune vente enregistrée. Clique sur ➕ après ta prochaine vente pour "
-                "construire ton tableau de bord.",
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        self.add_item(SuiviSelect())
 
 
-@bot.tree.command(name="vente", description="Suivi de tes ventes personnelles : ajouter, liste, supprimer, bilan")
-@app_commands.describe(photo="Photo de l'article vendu (optionnel, jointe à la vente si tu cliques sur ➕ Ajouter)")
-async def vente(interaction: discord.Interaction, photo: Optional[discord.Attachment] = None):
+@bot.tree.command(name="suivi", description="Suivi complet achat/revente : commandes à passer et ventes, tout en un seul endroit")
+@app_commands.describe(photo="Photo de l'article vendu (optionnel, jointe si tu choisis Ajouter une vente)")
+async def suivi(interaction: discord.Interaction, photo: Optional[discord.Attachment] = None):
     embed = discord.Embed(
-        title="💰 Suivi de tes ventes",
+        title="🔁 Suivi achat/revente",
         description=(
-            "Garde une trace de ce que tu vends sur Vinted, et suis ton bénéfice au fil du temps.\n\n"
-            "**Comment ça marche ?**\n"
-            "➕ **Ajouter une vente** — renseigne l'article, le prix vendu, et en option le prix affiché "
-            "sur l'annonce (si différent), le prix d'achat, et le temps en ligne avant la vente (tu peux "
-            "écrire ce que tu veux : '5j', '2 semaines', '10h'...). Une fois le formulaire envoyé, tu "
-            "peux directement poster une photo dans le salon pour l'associer à cette vente — pratique "
-            "pour enchaîner plusieurs ventes d'affilée, chacune avec sa propre photo.\n"
-            "🔗 **Vendre une commande** — si l'article vient d'une commande notée avec `/commande`, "
-            "choisis-la dans la liste : le formulaire se pré-remplit avec l'article et le prix d'achat, "
-            "et la commande est automatiquement marquée comme vendue.\n"
-            "🧾 **Mes ventes** — tes 15 dernières ventes, avec leur numéro (utile pour en supprimer une)\n"
-            "🗑️ **Supprimer** — corrige une erreur de saisie avec le numéro de la vente\n"
-            "📊 **Mon bilan** — depuis quand tu vends, chiffre d'affaires, bénéfice cumulé, marge moyenne, "
-            "temps de vente moyen, meilleures ventes et un petit graphique de tes 5 dernières ventes"
+            "Tout le cycle en un seul endroit : les articles que tu comptes acheter, et ceux que tu as "
+            "déjà vendus, avec ton bénéfice au fil du temps.\n\n"
+            "Choisis une action dans le menu déroulant ci-dessous 👇\n\n"
+            "**Commandes**\n"
+            "🛒 Ajouter · 📋 À passer · ✅ Marquer passée · 🗑️ Supprimer\n\n"
+            "**Ventes**\n"
+            "➕ Ajouter · 🔗 Vendre une commande (pré-remplie) · 🧾 Mes ventes · 🗑️ Supprimer · 📊 Mon bilan"
         ),
-        color=discord.Color.from_rgb(255, 215, 0),
+        color=discord.Color.from_rgb(255, 190, 60),
     )
     if photo:
         embed.set_thumbnail(url=photo.url)
-    embed.set_footer(text="Chaque personne ne voit que ses propres ventes, en privé.")
-    view = VenteIntroView(photo=photo)
-    await interaction.response.send_message(embed=embed, view=view)
+    embed.set_footer(text="Chaque personne ne voit que ses propres commandes et ventes, en privé.")
+    await interaction.response.send_message(embed=embed, view=SuiviView(photo=photo))
 
-
-# ============================================================
-#  Commandes prévues (articles qu'on compte acheter pour revendre)
-# ============================================================
-
-COMMANDES_FICHIER = Path("/tmp/commandes_prevues.json")
-
-
-def _charger_commandes():
-    if COMMANDES_FICHIER.exists():
-        try:
-            return json.loads(COMMANDES_FICHIER.read_text())
-        except Exception as e:
-            print(f"[commandes] échec de lecture du fichier, on repart de zéro : {e}")
-    return []
-
-
-async def _sauver_commandes():
-    try:
-        await asyncio.to_thread(COMMANDES_FICHIER.write_text, json.dumps(commandes_prevues))
-    except Exception as e:
-        print(f"[commandes] échec de sauvegarde : {e}")
-
-
-commandes_prevues = _charger_commandes()
-_compteur_id_commande = itertools.count(max([c["id"] for c in commandes_prevues], default=0) + 1)
-
-
-def _embed_liste_commandes(interaction: discord.Interaction, statut: str) -> Optional[discord.Embed]:
-    mes_commandes = [
-        c for c in commandes_prevues if c["user_id"] == interaction.user.id and c["statut"] == statut
-    ]
-    if not mes_commandes:
-        return None
-
-    lignes = []
-    for c in mes_commandes[-20:]:
-        prix_txt = f" — ~{c['prix_prevu']:.2f} €" if c.get("prix_prevu") is not None else ""
-        lien_txt = f" — [lien]({c['lien']})" if c.get("lien") else ""
-        note_txt = f"\n> {c['note']}" if c.get("note") else ""
-        lignes.append(f"`#{c['id']}` — **{c['article']}**{prix_txt}{lien_txt}{note_txt}")
-
-    titre = "🛒 Commandes à passer" if statut == "a_passer" else "✅ Commandes déjà passées"
-    embed = discord.Embed(title=titre, description="\n".join(lignes), color=discord.Color.from_rgb(52, 152, 219))
-    if len(mes_commandes) > 20:
-        embed.set_footer(text=f"20 plus récentes sur {len(mes_commandes)} au total")
-    return embed
-
-
-class CommandeAjouterModal(discord.ui.Modal, title="🛒 Nouvelle commande à passer"):
-    article = discord.ui.TextInput(label="Article à acheter", placeholder="ex: Sac à main vintage Coach", required=True, max_length=200)
-    prix_prevu = discord.ui.TextInput(
-        label="Budget prévu en € (optionnel)",
-        placeholder="ex: 20 — laisse vide si tu ne sais pas encore",
-        required=False,
-        max_length=10,
-    )
-    lien = discord.ui.TextInput(
-        label="Lien de l'annonce (optionnel)",
-        placeholder="ex: https://www.vinted.fr/items/...",
-        required=False,
-        max_length=300,
-    )
-    note = discord.ui.TextInput(
-        label="Note (optionnel)",
-        style=discord.TextStyle.paragraph,
-        placeholder="ex: attendre une baisse de prix, vérifier la taille...",
-        required=False,
-        max_length=300,
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        prix_prevu_val = None
-        if self.prix_prevu.value and self.prix_prevu.value.strip():
-            try:
-                prix_prevu_val = float(self.prix_prevu.value.strip().replace(",", "."))
-            except ValueError:
-                await interaction.response.send_message("⚠️ Le budget doit être un nombre (ex: 20 ou 19.90).", ephemeral=True)
-                return
-
-        nouvelle = {
-            "id": next(_compteur_id_commande),
-            "user_id": interaction.user.id,
-            "article": self.article.value.strip()[:200],
-            "prix_prevu": prix_prevu_val,
-            "lien": self.lien.value.strip()[:300] if self.lien.value else None,
-            "note": self.note.value.strip()[:300] if self.note.value else None,
-            "statut": "a_passer",
-            "date": discord.utils.utcnow().isoformat(),
-        }
-        commandes_prevues.append(nouvelle)
-        await _sauver_commandes()
-
-        texte = f"🛒 Commande `#{nouvelle['id']}` ajoutée : **{nouvelle['article']}**"
-        if prix_prevu_val is not None:
-            texte += f" (~{prix_prevu_val:.2f} €)"
-        texte += "\nRelance `/commande` puis ✅ une fois la commande passée pour l'archiver."
-        await interaction.response.send_message(texte, ephemeral=True)
-
-
-class CommandeMarquerPasseeModal(discord.ui.Modal, title="✅ Marquer comme passée"):
-    id_commande = discord.ui.TextInput(label="Numéro de la commande (# visible via 🛒)", placeholder="ex: 3", required=True, max_length=10)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            id_val = int(self.id_commande.value.strip().lstrip("#"))
-        except ValueError:
-            await interaction.response.send_message("⚠️ Le numéro doit être un nombre entier (ex: 3).", ephemeral=True)
-            return
-
-        trouvee = False
-        for c in commandes_prevues:
-            if c["id"] == id_val and c["user_id"] == interaction.user.id:
-                c["statut"] = "passee"
-                trouvee = True
-                break
-
-        if trouvee:
-            await _sauver_commandes()
-            await interaction.response.send_message(
-                f"✅ Commande `#{id_val}` marquée comme passée !\n"
-                "Une fois revendue, va dans `/vente` → 🔗 **Vendre une commande** pour l'enregistrer "
-                "directement avec le prix d'achat déjà pré-rempli.",
-                ephemeral=True,
-            )
-        else:
-            await interaction.response.send_message(
-                "Aucune commande à passer trouvée avec ce numéro (elle ne t'appartient peut-être pas, ou est déjà passée).",
-                ephemeral=True,
-            )
-
-
-class CommandeSupprimerModal(discord.ui.Modal, title="🗑️ Supprimer une commande"):
-    id_commande = discord.ui.TextInput(label="Numéro de la commande", placeholder="ex: 3", required=True, max_length=10)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            id_val = int(self.id_commande.value.strip().lstrip("#"))
-        except ValueError:
-            await interaction.response.send_message("⚠️ Le numéro doit être un nombre entier (ex: 3).", ephemeral=True)
-            return
-
-        avant = len(commandes_prevues)
-        commandes_prevues[:] = [
-            c for c in commandes_prevues if not (c["id"] == id_val and c["user_id"] == interaction.user.id)
-        ]
-        await _sauver_commandes()
-
-        if len(commandes_prevues) < avant:
-            await interaction.response.send_message(f"🗑️ Commande `#{id_val}` supprimée.", ephemeral=True)
-        else:
-            await interaction.response.send_message(
-                "Aucune commande trouvée avec ce numéro (elle ne t'appartient peut-être pas).", ephemeral=True
-            )
-
-
-class CommandeIntroView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Ajouter une commande", style=discord.ButtonStyle.success, emoji="🛒", custom_id="commande_ajouter_bouton")
-    async def ajouter(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CommandeAjouterModal())
-
-    @discord.ui.button(label="À passer", style=discord.ButtonStyle.secondary, emoji="📋", custom_id="commande_liste_bouton")
-    async def liste(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = _embed_liste_commandes(interaction, "a_passer")
-        if embed is None:
-            await interaction.response.send_message(
-                "Aucune commande en attente. Clique sur 🛒 pour en ajouter une.", ephemeral=True
-            )
-            return
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @discord.ui.button(label="Achetées (à vendre)", style=discord.ButtonStyle.secondary, emoji="📦", custom_id="commande_achetees_bouton")
-    async def achetees(self, interaction: discord.Interaction, button: discord.ui.Button):
-        commandes = _mes_commandes_passees(interaction.user.id)
-        if not commandes:
-            await interaction.response.send_message(
-                "Aucune commande achetée en attente de vente pour le moment.", ephemeral=True
-            )
-            return
-        await interaction.response.send_message(
-            "Choisis un article pour l'enregistrer comme vendu (le formulaire de vente sera pré-rempli) 👇",
-            view=CommandeSelectPourVenteView(commandes),
-            ephemeral=True,
-        )
-
-    @discord.ui.button(label="Marquer passée", style=discord.ButtonStyle.primary, emoji="✅", custom_id="commande_marquer_bouton")
-    async def marquer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CommandeMarquerPasseeModal())
-
-    @discord.ui.button(label="Supprimer", style=discord.ButtonStyle.danger, emoji="🗑️", custom_id="commande_supprimer_bouton")
-    async def supprimer(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CommandeSupprimerModal())
-
-
-@bot.tree.command(name="commande", description="Note les articles que tu comptes acheter pour revendre")
-async def commande(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🛒 Commandes à passer",
-        description=(
-            "Une liste perso des articles que tu repères et comptes acheter pour les revendre — pour "
-            "ne pas les oublier, avec ton budget prévu et un lien vers l'annonce si tu l'as déjà.\n\n"
-            "**Comment ça marche ?**\n"
-            "🛒 **Ajouter une commande** — article, budget prévu (optionnel), lien de l'annonce "
-            "(optionnel), et une note libre (optionnel)\n"
-            "📋 **À passer** — la liste de ce que tu comptes encore acheter\n"
-            "✅ **Marquer passée** — une fois l'achat fait, archive la commande avec son numéro\n"
-            "🗑️ **Supprimer** — retire une commande de la liste"
-        ),
-        color=discord.Color.from_rgb(52, 152, 219),
-    )
-    embed.set_footer(text="Chaque personne ne voit que ses propres commandes, en privé.")
-    view = CommandeIntroView()
-    await interaction.response.send_message(embed=embed, view=view)
 
 
 # ============================================================
