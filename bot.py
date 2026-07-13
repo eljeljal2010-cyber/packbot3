@@ -1185,10 +1185,86 @@ class VenteSupprimerModal(discord.ui.Modal, title="🗑️ Supprimer une vente")
 
 
 def _mes_commandes_passees(user_id: int) -> list:
-    """Commandes déjà achetées (statut 'passee') mais pas encore marquées vendues, les plus
-    récentes en premier — ce sont les seules candidates pour être liées à une nouvelle vente."""
+    """Commandes achetées (statut 'passee') mais pas encore mises en ligne, les plus récentes en
+    premier — ce sont les candidates pour être marquées 'en ligne'."""
     mes_commandes = [c for c in commandes_prevues if c["user_id"] == user_id and c["statut"] == "passee"]
     return list(reversed(mes_commandes))[:25]  # limite Discord : 25 options max dans un menu déroulant
+
+
+def _mes_commandes_en_ligne(user_id: int) -> list:
+    """Commandes déjà mises en ligne (statut 'en_ligne') mais pas encore vendues, les plus
+    récentes en premier — ce sont les candidates pour être liées à une nouvelle vente."""
+    mes_commandes = [c for c in commandes_prevues if c["user_id"] == user_id and c["statut"] == "en_ligne"]
+    return list(reversed(mes_commandes))[:25]
+
+
+class CommandeEnLigneModal(discord.ui.Modal, title="📤 Mettre en ligne"):
+    prix_annonce = discord.ui.TextInput(
+        label="Prix affiché sur l'annonce en € (optionnel)",
+        placeholder="ex: 30 — laisse vide si tu ne sais pas encore",
+        required=False,
+        max_length=10,
+    )
+
+    def __init__(self, commande: dict):
+        super().__init__()
+        self.commande = commande
+
+    async def on_submit(self, interaction: discord.Interaction):
+        prix_annonce_val = None
+        if self.prix_annonce.value and self.prix_annonce.value.strip():
+            try:
+                prix_annonce_val = float(self.prix_annonce.value.strip().replace(",", "."))
+            except ValueError:
+                await interaction.response.send_message("⚠️ Le prix doit être un nombre (ex: 30 ou 29.90).", ephemeral=True)
+                return
+
+        for c in commandes_prevues:
+            if c["id"] == self.commande["id"] and c["user_id"] == interaction.user.id:
+                c["statut"] = "en_ligne"
+                if prix_annonce_val is not None:
+                    c["prix_prevu"] = prix_annonce_val
+                break
+        await _sauver_commandes()
+
+        await interaction.response.send_message(
+            f"📤 **{self.commande['article']}** marqué comme en ligne !\n"
+            "Une fois vendu, choisis 💰 **Marquer vendu** dans `/suivi` pour finaliser la vente.",
+            ephemeral=True,
+        )
+
+
+class CommandeSelectPourEnLigne(discord.ui.Select):
+    def __init__(self, commandes: list):
+        options = [
+            discord.SelectOption(
+                label=c["article"][:100],
+                description=f"Commande #{c['id']}"[:100],
+                value=str(c["id"]),
+            )
+            for c in commandes
+        ]
+        super().__init__(placeholder="Quel article viens-tu de mettre en ligne ?", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        id_choisi = int(self.values[0])
+        commande = next(
+            (c for c in commandes_prevues if c["id"] == id_choisi and c["user_id"] == interaction.user.id),
+            None,
+        )
+        if commande is None or commande["statut"] != "passee":
+            await interaction.response.send_message(
+                "⚠️ Cette commande n'est plus disponible (déjà mise en ligne entre-temps ?).",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(CommandeEnLigneModal(commande))
+
+
+class CommandeSelectPourEnLigneView(discord.ui.View):
+    def __init__(self, commandes: list):
+        super().__init__(timeout=180)
+        self.add_item(CommandeSelectPourEnLigne(commandes))
 
 
 class CommandeSelectPourVente(discord.ui.Select):
@@ -1202,7 +1278,7 @@ class CommandeSelectPourVente(discord.ui.Select):
                 description=f"Commande #{c['id']}{prix_txt}"[:100],
                 value=str(c["id"]),
             ))
-        super().__init__(placeholder="Quelle commande viens-tu de vendre ?", options=options)
+        super().__init__(placeholder="Quel article viens-tu de vendre ?", options=options)
 
     async def callback(self, interaction: discord.Interaction):
         id_choisi = int(self.values[0])
@@ -1210,9 +1286,9 @@ class CommandeSelectPourVente(discord.ui.Select):
             (c for c in commandes_prevues if c["id"] == id_choisi and c["user_id"] == interaction.user.id),
             None,
         )
-        if commande is None or commande["statut"] != "passee":
+        if commande is None or commande["statut"] != "en_ligne":
             await interaction.response.send_message(
-                "⚠️ Cette commande n'est plus disponible (déjà liée à une vente entre-temps ?).",
+                "⚠️ Cet article n'est plus disponible (déjà lié à une vente entre-temps ?).",
                 ephemeral=True,
             )
             return
@@ -1236,8 +1312,10 @@ class SuiviSelect(discord.ui.Select):
                                   description="Une fois l'achat fait"),
             discord.SelectOption(label="Supprimer une commande", value="commande_supprimer", emoji="🗑️",
                                   description="Corrige une erreur de saisie"),
-            discord.SelectOption(label="Vendre une commande", value="vente_depuis_commande", emoji="🔗",
-                                  description="Convertit une commande achetée en vente (pré-rempli)"),
+            discord.SelectOption(label="Ajouter un article en ligne", value="commande_en_ligne", emoji="📤",
+                                  description="Marque une commande achetée comme mise en vente"),
+            discord.SelectOption(label="Marquer vendu", value="vente_depuis_commande", emoji="💰",
+                                  description="Finalise la vente d'un article en ligne (pré-rempli)"),
             discord.SelectOption(label="Mes ventes", value="vente_liste", emoji="🧾",
                                   description="Tes 15 dernières ventes"),
             discord.SelectOption(label="Supprimer une vente", value="vente_supprimer", emoji="🗑️",
@@ -1270,18 +1348,33 @@ class SuiviSelect(discord.ui.Select):
         elif choix == "commande_supprimer":
             await interaction.response.send_modal(CommandeSupprimerModal())
 
-        elif choix == "vente_depuis_commande":
+        elif choix == "commande_en_ligne":
             commandes = _mes_commandes_passees(interaction.user.id)
             if not commandes:
                 await interaction.response.send_message(
-                    "Tu n'as aucune commande achetée en attente de vente. Marque d'abord une commande "
-                    "comme passée (✅), elle apparaîtra ici une fois éligible.",
+                    "Tu n'as aucune commande achetée en attente de mise en ligne. Marque d'abord une "
+                    "commande comme passée (✅), elle apparaîtra ici ensuite.",
                     ephemeral=True,
                 )
                 return
             await interaction.response.send_message(
-                "Choisis la commande que tu viens de vendre 👇 (le formulaire de vente sera pré-rempli "
-                "avec l'article et le prix d'achat prévu) :",
+                "Quel article viens-tu de mettre en ligne ? 👇",
+                view=CommandeSelectPourEnLigneView(commandes),
+                ephemeral=True,
+            )
+
+        elif choix == "vente_depuis_commande":
+            commandes = _mes_commandes_en_ligne(interaction.user.id)
+            if not commandes:
+                await interaction.response.send_message(
+                    "Tu n'as aucun article en ligne en attente de vente. Choisis d'abord 📤 Ajouter un "
+                    "article en ligne, il apparaîtra ici une fois vendu.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_message(
+                "Quel article viens-tu de vendre ? 👇 (le formulaire de vente sera pré-rempli avec "
+                "l'article et le prix d'achat prévu) :",
                 view=CommandeSelectPourVenteView(commandes, photo=photo),
                 ephemeral=True,
             )
@@ -1290,7 +1383,7 @@ class SuiviSelect(discord.ui.Select):
             embed = _embed_liste_ventes(interaction)
             if embed is None:
                 await interaction.response.send_message(
-                    "Aucune vente enregistrée. Choisis ➕ Ajouter une vente pour commencer ton suivi.",
+                    "Aucune vente enregistrée. Choisis 💰 Marquer vendu une fois un article en ligne vendu.",
                     ephemeral=True,
                 )
                 return
@@ -1318,19 +1411,19 @@ class SuiviView(discord.ui.View):
         self.add_item(SuiviSelect())
 
 
-@bot.tree.command(name="suivi", description="Suivi complet achat/revente : commandes à passer et ventes, tout en un seul endroit")
-@app_commands.describe(photo="Photo de l'article vendu (optionnel, jointe si tu choisis Vendre une commande)")
+@bot.tree.command(name="suivi", description="Suivi complet achat/revente : commandes, mise en ligne et ventes, tout en un seul endroit")
+@app_commands.describe(photo="Photo de l'article vendu (optionnel, jointe si tu choisis Marquer vendu)")
 async def suivi(interaction: discord.Interaction, photo: Optional[discord.Attachment] = None):
     embed = discord.Embed(
         title="🔁 Suivi achat/revente",
         description=(
-            "Tout le cycle en un seul endroit : les articles que tu comptes acheter, et ceux que tu as "
-            "déjà vendus, avec ton bénéfice au fil du temps.\n\n"
+            "Tout le cycle en un seul endroit, du repérage à la vente.\n\n"
             "Choisis une action dans le menu déroulant ci-dessous 👇\n\n"
-            "**Commandes**\n"
-            "🛒 Ajouter · 📋 À passer · ✅ Marquer passée · 🗑️ Supprimer\n\n"
-            "**Ventes**\n"
-            "🔗 Vendre une commande (pré-remplie) · 🧾 Mes ventes · 🗑️ Supprimer · 📊 Mon bilan"
+            "**Le cycle complet**\n"
+            "🛒 Ajouter une commande → ✅ Marquer passée (achetée) → 📤 Ajouter un article en ligne "
+            "(mis en vente) → 💰 Marquer vendu (finalise la vente, pré-rempli)\n\n"
+            "**Autres actions**\n"
+            "📋 À passer · 🗑️ Supprimer une commande · 🧾 Mes ventes · 🗑️ Supprimer une vente · 📊 Mon bilan"
         ),
         color=discord.Color.from_rgb(255, 190, 60),
     )
