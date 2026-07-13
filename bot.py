@@ -2410,6 +2410,172 @@ async def description(
     await interaction.response.send_message(embed=embed, view=view)
 
 
+# ============================================================
+#  Détecteur de niches — forte demande / faible concurrence sur Vinted
+# ============================================================
+
+# Catégories courantes utilisées par défaut quand l'utilisateur ne fournit pas ses propres mots-clés.
+# Volontairement variées (mode homme/femme, sport, accessoires...) pour balayer plusieurs segments.
+NICHES_CATEGORIES_DEFAUT = [
+    "sneakers homme", "sac à main", "doudoune femme", "jean vintage", "maillot de foot",
+    "montre homme", "robe d'été", "manteau laine", "baskets femme", "sweat streetwear",
+    "bijoux fantaisie", "veste en cuir", "pull hiver", "casquette", "sac à dos",
+    "chemise homme", "jupe", "ceinture cuir", "legging sport", "doudoune homme",
+]
+
+NICHE_MOTS_CLES_MAX = 12  # limite le nb de mots-clés custom pour ne pas trop solliciter Vinted d'un coup
+NICHE_PAUSE_ENTRE_RECHERCHES = 2  # secondes entre deux recherches Vinted successives
+
+
+async def _analyser_niche(mot_cle: str) -> Optional[dict]:
+    """Cherche un mot-clé sur Vinted et calcule des indicateurs de marché : offre (nb d'annonces),
+    demande (favoris moyens), prix médian, et un score de 'tension' (demande rapportée à la
+    concurrence) qui sert à repérer les niches où il y a du monde intéressé mais peu de vendeurs."""
+    try:
+        items = await _rechercher_vinted_cache(mot_cle, per_page=40)
+    except Exception as e:
+        print(f"[niche] échec recherche pour '{mot_cle}' : {e}")
+        return None
+    if not items:
+        return None
+
+    prix_bruts = [p for p in (_prix_de(i) for i in items) if p is not None]
+    if not prix_bruts:
+        return None
+    prix_filtres, _ = _filtrer_valeurs_extremes(prix_bruts)
+
+    favoris = [_favoris_de(i) for i in items]
+    demande_moyenne = statistics.mean(favoris) if favoris else 0
+    offre = len(items)
+    prix_median = statistics.median(prix_filtres)
+
+    # Score de tension marché : la racine carrée de l'offre amortit l'effet des catégories très
+    # larges (des milliers d'annonces) sans pour autant ignorer complètement la concurrence.
+    score = demande_moyenne / (offre ** 0.5) if offre else 0
+
+    return {
+        "mot_cle": mot_cle,
+        "offre": offre,
+        "demande_moyenne": demande_moyenne,
+        "prix_median": prix_median,
+        "score": score,
+    }
+
+
+async def _detecter_niches(mots_cles: list) -> list:
+    """Analyse une liste de mots-clés l'un après l'autre (avec une petite pause entre chaque pour
+    ménager Vinted) et retourne les résultats triés par score de tension décroissant."""
+    resultats = []
+    for i, mc in enumerate(mots_cles):
+        res = await _analyser_niche(mc)
+        if res:
+            resultats.append(res)
+        if i < len(mots_cles) - 1:
+            await asyncio.sleep(NICHE_PAUSE_ENTRE_RECHERCHES)
+    resultats.sort(key=lambda r: r["score"], reverse=True)
+    return resultats
+
+
+async def _synthese_ia_niches(resultats: list) -> Optional[str]:
+    """Demande à l'IA un court commentaire stratégique sur le classement obtenu (facultatif —
+    si Groq n'est pas configuré ou échoue, on affiche juste le classement chiffré sans commentaire)."""
+    if groq_client is None:
+        return None
+    resume_donnees = "\n".join(
+        f"- {r['mot_cle']} : score {r['score']:.1f}, {r['demande_moyenne']:.0f} favoris moy., "
+        f"{r['offre']} annonces, {r['prix_median']:.2f} € médian"
+        for r in resultats[:10]
+    )
+    try:
+        reponse = await _appeler_groq(
+            model=MODELE_RESUME,
+            max_tokens=250,
+            temperature=0.4,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Tu es un analyste e-commerce spécialisé dans la revente d'articles d'occasion sur "
+                        "Vinted. On te donne un classement de catégories avec leur score de tension marché "
+                        "(demande rapportée à la concurrence), le nombre moyen de favoris, le nombre "
+                        "d'annonces concurrentes et le prix médian. Rédige un court commentaire (4-5 phrases "
+                        "maximum, en français, sans formule d'introduction) qui dit clairement quelle(s) "
+                        "niche(s) semble(nt) la/les plus intéressante(s) à exploiter en ce moment et pourquoi, "
+                        "et signale si une catégorie a beaucoup de favoris mais aussi énormément de "
+                        "concurrence (donc à nuancer)."
+                    ),
+                },
+                {"role": "user", "content": resume_donnees},
+            ],
+        )
+        texte = (reponse.choices[0].message.content or "").strip()
+        return texte or None
+    except Exception as e:
+        print(f"[niche] échec de la synthèse IA : {e}")
+        return None
+
+
+@bot.tree.command(
+    name="niche",
+    description="Détecte les niches Vinted à forte demande et faible concurrence (à partir de mots-clés ou d'une liste par défaut)",
+)
+@app_commands.describe(
+    mots_cles="Mots-clés/catégories à comparer, séparés par des virgules (optionnel — sinon une liste de catégories courantes est utilisée)"
+)
+async def niche(interaction: discord.Interaction, mots_cles: Optional[str] = None):
+    await interaction.response.defer(thinking=True)
+
+    if mots_cles and mots_cles.strip():
+        liste = [m.strip() for m in mots_cles.split(",") if m.strip()][:NICHE_MOTS_CLES_MAX]
+    else:
+        liste = NICHES_CATEGORIES_DEFAUT
+
+    if len(liste) < 2:
+        await interaction.followup.send(
+            "⚠️ Donne au moins 2 mots-clés séparés par une virgule (ex: `sneakers homme, sac à main`) pour comparer.",
+            ephemeral=True,
+        )
+        return
+
+    resultats = await _detecter_niches(liste)
+    if not resultats:
+        await interaction.followup.send(
+            "❌ Aucun résultat exploitable pour ces mots-clés (Vinted a peut-être bloqué temporairement, réessaie dans quelques minutes).",
+            ephemeral=True,
+        )
+        return
+
+    embed = discord.Embed(
+        title="🧭 Détecteur de niches Vinted",
+        description=(
+            f"Analyse de **{len(resultats)}** catégorie(s), classées par **score de tension marché** "
+            "(❤️ demande moyenne rapportée à 📦 la concurrence — plus le score est haut, plus la niche "
+            "est intéressante : du monde intéressé, peu de vendeurs en face)."
+        ),
+        color=discord.Color.from_rgb(255, 165, 0),
+    )
+    embed.timestamp = discord.utils.utcnow()
+
+    medailles = ["🥇", "🥈", "🥉"]
+    for idx, r in enumerate(resultats[:10]):
+        medaille = medailles[idx] if idx < len(medailles) else f"`{idx + 1}.`"
+        embed.add_field(
+            name=f"{medaille} {r['mot_cle']}",
+            value=(
+                f"Score : **{r['score']:.1f}**\n"
+                f"❤️ {r['demande_moyenne']:.0f} favoris moy. • 📦 {r['offre']} annonces • 💶 {r['prix_median']:.2f} € médian"
+            ),
+            inline=False,
+        )
+
+    commentaire_ia = await _synthese_ia_niches(resultats)
+    if commentaire_ia:
+        embed.add_field(name="🤖 Analyse", value=commentaire_ia[:1024], inline=False)
+
+    embed.set_footer(text="Score = favoris moyens / √(nb d'annonces) • Données publiques Vinted, à titre indicatif")
+    await interaction.followup.send(embed=embed)
+
+
 if __name__ == "__main__":
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
