@@ -1888,13 +1888,13 @@ class EstimerModal(discord.ui.Modal, title="🔍 Nouvelle estimation Vinted"):
         max_length=10,
     )
     prix_vise = discord.ui.TextInput(
-        label="Prix auquel tu veux le vendre en € (optionnel)",
+        label="Prix visé en € (optionnel)",
         placeholder="Laisse vide pour un prix conseillé automatique",
         required=False,
         max_length=10,
     )
     temps_vise = discord.ui.TextInput(
-        label="En combien de temps veux-tu le vendre ? (optionnel)",
+        label="Délai visé pour vendre (optionnel)",
         placeholder="ex: 5j, 1 semaine — laisse vide si tu ne sais pas",
         required=False,
         max_length=20,
