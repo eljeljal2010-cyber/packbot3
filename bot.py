@@ -1225,7 +1225,7 @@ class CommandeSelectPourVenteView(discord.ui.View):
         self.add_item(CommandeSelectPourVente(commandes))
 
 
-
+class VenteIntroView(discord.ui.View):
     def __init__(self, photo: Optional[discord.Attachment] = None):
         super().__init__(timeout=None)
         self.photo = photo
