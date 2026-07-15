@@ -1898,15 +1898,15 @@ async def _lancer_estimation(
     if prix_vise is not None:
         prix_conseille = prix_vise
         if prix_vise > prix_max:
-            position_marche = f"⚠️ Plus cher que toutes les annonces comparables (max observé : {prix_max:.2f} €) — risque de rester en ligne longtemps."
+            position_marche = f"⚠️ Plus cher que tout le marché (max : {prix_max:.2f} €) — risque de rester en ligne longtemps."
         elif prix_vise > prix_median:
-            position_marche = f"➖ Au-dessus du prix médian du marché ({prix_median:.2f} €) — vendable, mais moins rapidement."
+            position_marche = f"➖ Au-dessus de la médiane ({prix_median:.2f} €) — vendable, mais plus lentement."
         elif prix_vise < prix_min:
-            position_marche = f"✅ En dessous de toutes les annonces comparables (min observé : {prix_min:.2f} €) — devrait partir vite."
+            position_marche = f"✅ En dessous de tout le marché (min : {prix_min:.2f} €) — devrait partir vite."
         else:
             position_marche = f"✅ Dans la fourchette du marché (médiane : {prix_median:.2f} €)."
         if prix_achat and prix_vise <= prix_achat:
-            marge_avertissement = f"⚠️ À ce prix, tu ne couvres même pas ton prix d'achat ({prix_achat:.2f} €)."
+            marge_avertissement = f"⚠️ Ne couvre même pas ton prix d'achat ({prix_achat:.2f} €)."
     elif prix_achat:
         pourcentage_marge = _marge_cible_par_defaut(prix_achat)
         prix_minimum_rentable = round(prix_achat * (1 + pourcentage_marge / 100), 2)
@@ -1925,11 +1925,10 @@ async def _lancer_estimation(
     barre = "▰" * min(10, round(demande_moyenne / 5)) + "▱" * (10 - min(10, round(demande_moyenne / 5)))
 
     embed_principal = discord.Embed(
-        title="📊 Estimation de prix",
+        title=f"📊 {article}",
         color=discord.Color.from_rgb(30, 200, 120),
     )
     embed_principal.timestamp = discord.utils.utcnow()
-    embed_principal.add_field(name="🛍️ Article", value=f"**{article}**", inline=False)
     if mots_cles_photo:
         embed_principal.add_field(
             name="📸 Recherche affinée grâce à ta photo",
@@ -1943,22 +1942,18 @@ async def _lancer_estimation(
         value=f"{barre}\n{demande_moyenne:.0f} favoris en moyenne",
         inline=False,
     )
-    embed_principal.add_field(
-        name="💡 Prix visé" if prix_vise is not None else "💡 Prix conseillé",
-        value=f"## {prix_conseille:.2f} €",
-        inline=False,
-    )
+
+    # Bloc prix compact : prix conseillé/visé + position marché + bénéfice + avertissement,
+    # regroupés en un seul champ pour éviter d'empiler trop de blocs séparés.
+    bloc_prix = [f"**{prix_conseille:.2f} €** {'(prix visé)' if prix_vise is not None else '(prix conseillé)'}"]
     if position_marche:
-        embed_principal.add_field(name="📍 Position par rapport au marché", value=position_marche, inline=False)
+        bloc_prix.append(position_marche)
     if prix_achat:
         benefice = round(prix_conseille - prix_achat, 2)
-        embed_principal.add_field(
-            name="📈 Bénéfice estimé",
-            value=f"{'+' if benefice >= 0 else ''}{benefice:.2f} € (acheté {prix_achat:.2f} €)",
-            inline=False,
-        )
+        bloc_prix.append(f"{'+' if benefice >= 0 else ''}{benefice:.2f} € de bénéf. (acheté {prix_achat:.2f} €)")
     if marge_avertissement:
-        embed_principal.add_field(name="⚠️ Attention", value=marge_avertissement, inline=False)
+        bloc_prix.append(marge_avertissement)
+    embed_principal.add_field(name="💰 Prix & marge", value="\n".join(bloc_prix), inline=False)
 
     # --- Verdict "ça vaut le coup ?" + temps de vente estimé ---
     marge_pct_reelle = ((prix_conseille - prix_achat) / prix_achat * 100) if prix_achat else None
