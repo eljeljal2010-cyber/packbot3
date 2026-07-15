@@ -941,7 +941,15 @@ def _embed_liste_commandes(interaction: discord.Interaction) -> Optional[discord
         for c in du_statut:
             prix = c.get("prix_prevu")
             prix_txt = f" — ~{prix:.2f} €" if prix is not None else ""
-            lignes.append(f"`#{c['id']}` {c['article']}{prix_txt}")
+            ligne = f"`#{c['id']}` {c['article']}{prix_txt}"
+            details = []
+            if c.get("lien"):
+                details.append(f"[🔗 lien]({c['lien']})")
+            if c.get("note"):
+                details.append(f"📝 {c['note']}")
+            if details:
+                ligne += "\n" + " · ".join(details)
+            lignes.append(ligne)
         embed.add_field(name=f"{label} ({len(du_statut)})", value="\n".join(lignes), inline=False)
 
     embed.set_footer(text=f"{len(mes_commandes)} commande(s) au total (15 plus récentes par statut affichées)")
