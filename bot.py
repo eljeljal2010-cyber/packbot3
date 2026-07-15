@@ -918,6 +918,36 @@ def _barre_texte(valeur, valeur_max, longueur=10):
     return "▰" * rempli + "▱" * (longueur - rempli)
 
 
+STATUTS_COMMANDE_LABELS = {
+    "a_passer": "🛒 À acheter",
+    "passee": "✅ Achetée, pas encore en ligne",
+    "en_ligne": "📤 En ligne, pas encore vendue",
+}
+
+
+def _embed_liste_commandes(interaction: discord.Interaction) -> Optional[discord.Embed]:
+    """Vue d'ensemble de toutes les commandes de l'utilisateur, groupées par statut (contrairement
+    aux autres actions du menu qui ne montrent que les commandes concernées par cette action précise)."""
+    mes_commandes = [c for c in commandes_prevues if c["user_id"] == interaction.user.id]
+    if not mes_commandes:
+        return None
+
+    embed = discord.Embed(title="📦 Tes commandes en cours", color=discord.Color.blurple())
+    for statut_key, label in STATUTS_COMMANDE_LABELS.items():
+        du_statut = list(reversed([c for c in mes_commandes if c["statut"] == statut_key]))[:15]
+        if not du_statut:
+            continue
+        lignes = []
+        for c in du_statut:
+            prix = c.get("prix_prevu")
+            prix_txt = f" — ~{prix:.2f} €" if prix is not None else ""
+            lignes.append(f"`#{c['id']}` {c['article']}{prix_txt}")
+        embed.add_field(name=f"{label} ({len(du_statut)})", value="\n".join(lignes), inline=False)
+
+    embed.set_footer(text=f"{len(mes_commandes)} commande(s) au total (15 plus récentes par statut affichées)")
+    return embed
+
+
 def _embed_liste_ventes(interaction: discord.Interaction) -> Optional[discord.Embed]:
     mes_ventes = [v for v in ventes_enregistrees if v["user_id"] == interaction.user.id]
     if not mes_ventes:
@@ -1484,6 +1514,8 @@ class SuiviSelect(discord.ui.Select):
         options = [
             discord.SelectOption(label="Ajouter une commande", value="commande_ajouter", emoji="🛒",
                                   description="Note un article que tu comptes acheter pour revendre"),
+            discord.SelectOption(label="Mes commandes", value="commande_liste", emoji="📦",
+                                  description="Toutes tes commandes en cours, par statut"),
             discord.SelectOption(label="Marquer une commande passée", value="commande_marquer", emoji="✅",
                                   description="Une fois l'achat fait"),
             discord.SelectOption(label="Supprimer une commande", value="commande_supprimer", emoji="🗑️",
@@ -1507,6 +1539,16 @@ class SuiviSelect(discord.ui.Select):
 
         if choix == "commande_ajouter":
             await interaction.response.send_modal(CommandeAjouterModal())
+
+        elif choix == "commande_liste":
+            embed = _embed_liste_commandes(interaction)
+            if embed is None:
+                await interaction.response.send_message(
+                    "Tu n'as encore ajouté aucune commande. Choisis 🛒 **Ajouter une commande** pour commencer.",
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
         elif choix == "commande_marquer":
             commandes = _mes_commandes_a_passer(interaction.user.id)
@@ -1600,7 +1642,7 @@ async def suivi(interaction: discord.Interaction, photo: Optional[discord.Attach
             "🛒 Ajouter une commande → ✅ Marquer passée (achetée) → 📤 Ajouter un article en ligne "
             "(mis en vente) → 💰 Marquer vendu (finalise la vente, pré-rempli)\n\n"
             "**Autres actions**\n"
-            "🗑️ Supprimer une commande · 🧾 Mes ventes · 🗑️ Supprimer une vente · 📊 Mon bilan"
+            "📦 Mes commandes · 🗑️ Supprimer une commande · 🧾 Mes ventes · 🗑️ Supprimer une vente · 📊 Mon bilan"
         ),
         color=discord.Color.from_rgb(255, 190, 60),
     )
