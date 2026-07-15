@@ -1921,11 +1921,16 @@ async def _lancer_estimation(
     else:
         prix_conseille = max(prix_median, prix_min)
 
-    # --- Embed principal (statistiques) ---
+    # --- Embed principal : mise en page narrative plutôt qu'un empilement de blocs séparés ---
     barre = "▰" * min(10, round(demande_moyenne / 5)) + "▱" * (10 - min(10, round(demande_moyenne / 5)))
 
     embed_principal = discord.Embed(
         title=f"📊 {article}",
+        description=(
+            f"Sur Vinted, cet article se négocie en moyenne à **{prix_moyen:.2f} €** "
+            f"(de {prix_min:.2f} € à {prix_max:.2f} €).\n"
+            f"❤️ {barre}  *{demande_moyenne:.0f} favoris en moyenne sur les annonces comparables*"
+        ),
         color=discord.Color.from_rgb(30, 200, 120),
     )
     embed_principal.timestamp = discord.utils.utcnow()
@@ -1935,25 +1940,26 @@ async def _lancer_estimation(
             value=f"`{mots_cles_photo}`",
             inline=False,
         )
-    embed_principal.add_field(name="💶 Prix moyen", value=f"{prix_moyen:.2f} €", inline=True)
-    embed_principal.add_field(name="↔️ Fourchette", value=f"{prix_min:.2f} € – {prix_max:.2f} €", inline=True)
-    embed_principal.add_field(
-        name="❤️ Demande",
-        value=f"{barre}\n{demande_moyenne:.0f} favoris en moyenne",
-        inline=False,
-    )
 
-    # Bloc prix compact : prix conseillé/visé + position marché + bénéfice + avertissement,
-    # regroupés en un seul champ pour éviter d'empiler trop de blocs séparés.
-    bloc_prix = [f"**{prix_conseille:.2f} €** {'(prix visé)' if prix_vise is not None else '(prix conseillé)'}"]
+    # Bloc prix : une ou deux phrases fluides plutôt qu'une liste de lignes de données brutes.
+    phrase_prix = f"Je te conseille de viser **{prix_conseille:.2f} €**" if prix_vise is None else f"Ton prix visé de **{prix_conseille:.2f} €**"
     if position_marche:
-        bloc_prix.append(position_marche)
+        # position_marche commence par un emoji suivi d'un espace ; on l'enchaîne dans la phrase
+        # (en minuscule pour que ça se lise comme une seule phrase fluide).
+        reste = position_marche.split(" ", 1)[1] if " " in position_marche else position_marche
+        reste = reste[0].lower() + reste[1:] if reste else reste
+        phrase_prix += " — " + reste
+    else:
+        phrase_prix += "."
     if prix_achat:
         benefice = round(prix_conseille - prix_achat, 2)
-        bloc_prix.append(f"{'+' if benefice >= 0 else ''}{benefice:.2f} € de bénéf. (acheté {prix_achat:.2f} €)")
+        phrase_prix += (
+            f" Niveau marge, ça te laisserait **{'+' if benefice >= 0 else ''}{benefice:.2f} €** "
+            f"par rapport à ton achat à {prix_achat:.2f} €."
+        )
     if marge_avertissement:
-        bloc_prix.append(marge_avertissement)
-    embed_principal.add_field(name="💰 Prix & marge", value="\n".join(bloc_prix), inline=False)
+        phrase_prix += " " + marge_avertissement
+    embed_principal.add_field(name="💰 Prix", value=phrase_prix, inline=False)
 
     # --- Verdict "ça vaut le coup ?" + temps de vente estimé ---
     marge_pct_reelle = ((prix_conseille - prix_achat) / prix_achat * 100) if prix_achat else None
@@ -1965,13 +1971,28 @@ async def _lancer_estimation(
     if jours_vises is not None:
         jours_reference = jours_moyens if jours_moyens is not None else 10  # repère grossier si pas d'historique
         if jours_vises >= jours_reference * 1.3:
-            raisons.append(f"😌 Ton objectif ({_formater_duree(jours_vises)}) est large par rapport à l'estimation — bonne marge de sécurité.")
+            raisons.append(f"😌 ton objectif ({_formater_duree(jours_vises)}) est large par rapport à l'estimation, bonne marge de sécurité")
         elif jours_vises >= jours_reference * 0.7:
-            raisons.append(f"👍 Ton objectif ({_formater_duree(jours_vises)}) semble réaliste au vu de la demande/concurrence.")
+            raisons.append(f"👍 ton objectif ({_formater_duree(jours_vises)}) semble réaliste au vu de la demande/concurrence")
         else:
-            raisons.append(f"⚠️ Ton objectif ({_formater_duree(jours_vises)}) est ambitieux — baisse le prix ou soigne l'annonce pour tenir ce délai.")
+            raisons.append(f"⚠️ ton objectif ({_formater_duree(jours_vises)}) est ambitieux, baisse le prix ou soigne l'annonce pour tenir ce délai")
 
-    embed_principal.add_field(name="🧭 Ça vaut le coup ?", value=f"**{verdict}**\n" + "\n".join(raisons), inline=False)
+    # On transforme la liste de raisons (chacune préfixée d'un emoji) en une phrase unique et fluide,
+    # plutôt qu'une checklist verticale.
+    phrases_raisons = []
+    for r in raisons:
+        texte = r.split(" ", 1)[1] if " " in r else r
+        phrases_raisons.append(texte[0].lower() + texte[1:] if texte else texte)
+    if len(phrases_raisons) <= 1:
+        raisons_phrase = phrases_raisons[0] if phrases_raisons else ""
+    else:
+        raisons_phrase = ", ".join(phrases_raisons[:-1]) + " et " + phrases_raisons[-1]
+
+    embed_principal.add_field(
+        name="🧭 Verdict",
+        value=f"**{verdict}** — {raisons_phrase}.",
+        inline=False,
+    )
     embed_principal.add_field(
         name="⏳ Temps de vente estimé",
         value=texte_temps + ("" if est_reel else "\n-# Vinted ne communique pas la durée réelle de vente : estimation approximative."),
